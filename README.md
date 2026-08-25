@@ -273,3 +273,9 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
 The tests stub the provider — no API key, no network. They cover SRT round-trip
 fidelity, batch repair when the model drops a cue, markup preservation, and the
 webhook shapes Bazarr actually sends.
+
+---
+
+## License
+
+[MIT](LICENSE).
