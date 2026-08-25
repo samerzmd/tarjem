@@ -221,6 +221,7 @@ class TranslationStats:
     total: int = 0
     translated: int = 0
     untouched: int = 0        # cues we could not translate and passed through
+    reused: int = 0           # repeats that took an earlier cue's translation
     batches: int = 0
     repairs: int = 0
     seconds: float = 0.0
@@ -231,6 +232,7 @@ class TranslationStats:
             "total_cues": self.total,
             "translated": self.translated,
             "untranslated": self.untouched,
+            "reused": self.reused,
             "batches": self.batches,
             "repairs": self.repairs,
             "glossary_terms": self.glossary_terms,
@@ -290,7 +292,11 @@ class Translator:
         if glossary:
             stats.glossary_terms = len(glossary.terms)
 
-        translatable, passthrough = _partition(cues, self.cfg)
+        translatable, passthrough, echoes = _partition(cues, self.cfg)
+        stats.reused = sum(len(v) for v in echoes.values())
+        if stats.reused:
+            log.info("%d of %d cues are repeats - translating %d unique lines",
+                     stats.reused, len(cues), len(translatable))
         system = _system_blocks(self.cfg, glossary)
         title_block = f"<title>{title}</title>\n\n" if title else ""
 
@@ -312,6 +318,15 @@ class Translator:
             stats.batches += 1
             if progress:
                 progress(n / max(1, len(batches)), f"batch {n}/{len(batches)}")
+
+        # Every repeat of a line takes the translation its first occurrence got.
+        for first, others in echoes.items():
+            text = results.get(first)
+            if text is None:
+                stats.untouched += len(others)
+                continue
+            for other in others:
+                results[other] = text
 
         out: list[srt.Cue] = []
         for i, cue in enumerate(cues):
@@ -409,10 +424,25 @@ class Translator:
 # Helpers
 # --------------------------------------------------------------------------
 
-def _partition(cues: list[srt.Cue], cfg: Settings) -> tuple[list[tuple[int, srt.Cue]], set[int]]:
-    """Split cues into ones worth sending and ones to copy through verbatim."""
+def _partition(
+    cues: list[srt.Cue], cfg: Settings
+) -> tuple[list[tuple[int, srt.Cue]], set[int], dict[int, list[int]]]:
+    """Decide what actually needs sending to the model.
+
+    Three outcomes per cue: send it, copy it through untouched, or recognise it
+    as a line already being sent and reuse that translation.
+
+    The last one matters more than it sounds. A fansub .ass flattened into SRT
+    by ffmpeg can carry thousands of cues - karaoke split per syllable, signs,
+    and the same line repeated under several styles. One anime episode came in
+    at 5,359 cues against a normal ~350. Translating each occurrence separately
+    would be both enormously slow and less consistent than translating it once.
+    """
     send: list[tuple[int, srt.Cue]] = []
     skip: set[int] = set()
+    seen: dict[str, int] = {}          # normalised text -> index we are sending
+    echoes: dict[int, list[int]] = {}  # that index -> others sharing its text
+
     for i, cue in enumerate(cues):
         body, _ = srt.undress(cue.text)
         if cfg.strip_hi:
@@ -420,8 +450,17 @@ def _partition(cues: list[srt.Cue], cfg: Settings) -> tuple[list[tuple[int, srt.
         if not body.strip() or not any(ch.isalpha() for ch in body):
             skip.add(i)
             continue
+
+        key = " ".join(body.split()).casefold()
+        first = seen.get(key)
+        if first is not None:
+            echoes.setdefault(first, []).append(i)
+            continue
+
+        seen[key] = i
         send.append((i, srt.Cue(cue.index, cue.start, cue.end, body, cue.coords)))
-    return send, skip
+
+    return send, skip, echoes
 
 
 def _chunks(items: list, size: int) -> Iterable[list]:

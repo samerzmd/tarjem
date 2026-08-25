@@ -28,6 +28,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--batch-size", type=int, default=settings.batch_size)
     parser.add_argument("--limit", type=int, default=0, help="only translate the first N cues (for a quick taste)")
     parser.add_argument("--no-glossary", action="store_true")
+    parser.add_argument("--analyze", action="store_true",
+                        help="report what the file contains and what it would cost, then stop")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -61,6 +63,9 @@ def main(argv: list[str] | None = None) -> int:
         cues = cues[:args.limit]
     print(f"{len(cues)} cues", file=sys.stderr)
 
+    if args.analyze:
+        return analyze(cues)
+
     provider = build_provider(settings)
     translator = Translator(provider, settings)
     title = args.input.stem
@@ -80,6 +85,39 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nwrote {out}", file=sys.stderr)
     print(f"stats: {stats.as_dict()}", file=sys.stderr)
     print(f"usage: {provider.usage.as_dict()}", file=sys.stderr)
+    return 0
+
+
+def analyze(cues) -> int:
+    """What is actually in this file, and what will it cost to translate?
+
+    Worth running before queueing anything from an anime library: a fansub .ass
+    flattened into SRT can carry thousands of karaoke and sign cues that dwarf
+    the real dialogue.
+    """
+    from .translate import _partition
+
+    send, skip, echoes = _partition(cues, settings)
+    reused = sum(len(v) for v in echoes.values())
+    unique = len(send)
+    batches = -(-unique // settings.batch_size) if unique else 0
+    short = sum(1 for c in cues if c.duration and c.duration < 300)
+
+    print(f"""
+  total cues        {len(cues)}
+  unique lines      {unique}      <- what actually gets sent
+  repeats           {reused}      <- translated once, reused
+  no text to send   {len(skip)}      <- symbols, numbers, blanks
+  under 300ms       {short}      <- typically karaoke split per syllable
+
+  batches at BATCH_SIZE={settings.batch_size}: {batches}
+""", file=sys.stderr)
+
+    if len(cues) > 2000:
+        print("  This is far more than a normal episode (~350 cues) or film (~1200).\n"
+              "  The source is probably a fansub .ass with karaoke and signs.\n"
+              "  Prefer a plain English sidecar for this title if one exists.\n",
+              file=sys.stderr)
     return 0
 
 

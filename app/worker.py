@@ -80,6 +80,12 @@ class Pipeline:
 
         self.store.update(job_id, origin=source.origin, detail=source.detail, progress=0.05)
         log.info("job %s: %d cues from %s (%s)", job_id, len(cues), source.origin, source.detail)
+        if len(cues) > 2000:
+            # A 45-minute episode is ~600 cues. Several thousand means a fansub
+            # .ass with karaoke split per syllable, signs, and styled duplicates,
+            # flattened by ffmpeg. Repeats collapse below; the rest is real work.
+            log.warning("job %s: %d cues is very high for one file - expect this "
+                        "to take proportionally longer", job_id, len(cues))
 
         provider = build_provider(self.cfg)
         translator = Translator(provider, self.cfg)

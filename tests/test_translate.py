@@ -176,3 +176,47 @@ def test_guardrails_ride_along_with_the_cached_prefix(cfg):
     cfg.grammar_guardrails = True
     blocks = _system_blocks(cfg, None)
     assert blocks[0].cache is True
+
+
+# -- translation memory ----------------------------------------------------
+# A fansub .ass flattened to SRT repeats the same line many times over. One real
+# anime episode arrived with 5,359 cues against a normal ~350.
+
+def test_repeated_lines_are_translated_once_and_reused(cfg):
+    cues = [
+        srt.Cue(1, 0, 1000, "Get down!"),
+        srt.Cue(2, 1000, 2000, "Something else entirely."),
+        srt.Cue(3, 2000, 3000, "Get down!"),
+        srt.Cue(4, 3000, 4000, "get   DOWN!"),   # same line, different casing/spacing
+    ]
+    provider = StubProvider()
+    out, stats = Translator(provider, cfg).translate(cues, "Test")
+
+    assert len(out) == 4
+    assert stats.reused == 2
+    assert stats.translated == 4          # every cue still ends up translated
+    assert out[0].text == out[2].text == out[3].text
+    assert "Something else" in out[1].text
+
+
+def test_the_model_only_sees_the_unique_lines(cfg):
+    cues = [srt.Cue(i + 1, i * 1000, i * 1000 + 900, "Yes.") for i in range(50)]
+    cues.append(srt.Cue(51, 60000, 61000, "A distinct line."))
+    provider = StubProvider()
+    _, stats = Translator(provider, cfg).translate(cues, "Test")
+
+    # 51 cues, 2 unique -> a single batch, not six.
+    assert stats.batches == 1
+    assert stats.reused == 49
+
+
+def test_a_repeat_of_a_failed_line_is_counted_as_untranslated(cfg):
+    cues = [
+        srt.Cue(1, 0, 1000, "Dropped line."),
+        srt.Cue(2, 1000, 2000, "Dropped line."),
+        srt.Cue(3, 2000, 3000, "Kept line."),
+    ]
+    out, stats = Translator(StubProvider(drop={0}), cfg).translate(cues, "Test")
+    assert out[0].text == "Dropped line." and out[1].text == "Dropped line."
+    assert stats.untouched == 2
+    assert "Kept line" in out[2].text
