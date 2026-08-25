@@ -222,6 +222,7 @@ class TranslationStats:
     translated: int = 0
     untouched: int = 0        # cues we could not translate and passed through
     reused: int = 0           # repeats that took an earlier cue's translation
+    collapsed: int = 0        # stacked duplicates merged away on write
     batches: int = 0
     repairs: int = 0
     seconds: float = 0.0
@@ -233,6 +234,7 @@ class TranslationStats:
             "translated": self.translated,
             "untranslated": self.untouched,
             "reused": self.reused,
+            "collapsed": self.collapsed,
             "batches": self.batches,
             "repairs": self.repairs,
             "glossary_terms": self.glossary_terms,

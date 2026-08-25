@@ -195,6 +195,51 @@ def _split_line(line: str, max_line: int, max_parts: int) -> list[str]:
     return [head] + _split_line(tail, max_line, max_parts - 1)
 
 
+def _norm(text: str) -> str:
+    return " ".join(re.sub(r"<[^>]+>|\{\\[^}]*\}", "", text).split()).casefold()
+
+
+def overlapping_duplicates(cues: list[Cue], window: int = 60) -> int:
+    """Count cues that repeat a nearby cue's text *while it is still on screen*.
+
+    Sequential repeats are ordinary - a character says "No!" twice. Repeats that
+    overlap are a rendering artifact, usually an .ass with several styled layers
+    flattened into SRT, and they stack on top of each other on playback.
+    """
+    hits = 0
+    for i, cue in enumerate(cues):
+        key = _norm(cue.text)
+        if not key:
+            continue
+        for prev in cues[max(0, i - window):i]:
+            if prev.end >= cue.start and cue.end >= prev.start and _norm(prev.text) == key:
+                hits += 1
+                break
+    return hits
+
+
+def collapse_duplicates(cues: list[Cue], window: int = 60) -> tuple[list[Cue], int]:
+    """Merge identical cues that overlap into a single cue spanning both.
+
+    Only overlapping repeats are merged; a line genuinely said twice, seconds
+    apart, is left alone.
+    """
+    out: list[Cue] = []
+    for cue in cues:
+        key = _norm(cue.text)
+        merged = False
+        if key:
+            for prev in out[-window:]:
+                if prev.end >= cue.start and cue.end >= prev.start and _norm(prev.text) == key:
+                    prev.end = max(prev.end, cue.end)
+                    prev.start = min(prev.start, cue.start)
+                    merged = True
+                    break
+        if not merged:
+            out.append(Cue(cue.index, cue.start, cue.end, cue.text, cue.coords))
+    return out, len(cues) - len(out)
+
+
 def strip_hi(text: str) -> str:
     """Drop hearing-impaired annotations. Returns '' if nothing survives."""
     out = HI_BRACKET_RE.sub("", text)

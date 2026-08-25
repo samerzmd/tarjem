@@ -124,6 +124,12 @@ class Pipeline:
                 return
 
             note(0.98, "writing")
+            if self.cfg.collapse_duplicates:
+                translated, merged = srt.collapse_duplicates(translated)
+                if merged:
+                    log.info("job %s: merged %d stacked duplicate cues, writing %d",
+                             job_id, merged, len(translated))
+                    stats.collapsed = merged
             out = self._write(video, translated, source)
             self.store.finish(job_id, DONE, output=str(out), progress=1.0, stage="done",
                               stats=stats.as_dict(), usage=provider.usage.as_dict())

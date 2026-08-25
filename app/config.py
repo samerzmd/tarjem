@@ -61,6 +61,10 @@ class Settings:
     strip_hi: bool = _bool("STRIP_HI", False)
     max_line_chars: int = _int("MAX_LINE_CHARS", 42)
     max_lines: int = _int("MAX_LINES", 2)
+    # Merge identical cues that overlap. An .ass with several styled layers
+    # flattened into SRT repeats each line on top of itself; left alone they
+    # render stacked. Only overlapping repeats are touched.
+    collapse_duplicates: bool = _bool("COLLAPSE_DUPLICATES", True)
 
     # --- model -----------------------------------------------------------
     provider: str = _str("LLM_PROVIDER", "anthropic")

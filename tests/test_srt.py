@@ -99,3 +99,46 @@ def test_malformed_block_is_skipped_not_fatal():
     text = SAMPLE + "\nWEBVTT junk\n\n4\n00:00:11,000 --> 00:00:12,000\nEnd\n"
     cues = srt.parse(text)
     assert len(cues) == 4 and cues[-1].text == "End"
+
+
+# -- stacked duplicates ----------------------------------------------------
+# An .ass with several styled layers, flattened to SRT by ffmpeg, repeats each
+# line on top of itself. One real episode: 5,390 cues, 346 unique lines.
+
+def _c(i, start, end, text):
+    return srt.Cue(i, start, end, text)
+
+
+def test_overlapping_duplicates_are_counted():
+    cues = [_c(1, 0, 2000, "Hello."), _c(2, 100, 2100, "Hello."), _c(3, 200, 2200, "Hello.")]
+    assert srt.overlapping_duplicates(cues) == 2
+
+
+def test_a_line_repeated_later_is_not_a_stacked_duplicate():
+    cues = [_c(1, 0, 2000, "No!"), _c(2, 30000, 31000, "No!")]
+    assert srt.overlapping_duplicates(cues) == 0
+
+
+def test_collapse_merges_stacked_copies_into_one_spanning_cue():
+    cues = [_c(1, 1000, 3000, "Hello."), _c(2, 1200, 3500, "Hello."), _c(3, 900, 2000, "Hello.")]
+    out, merged = srt.collapse_duplicates(cues)
+    assert merged == 2 and len(out) == 1
+    assert out[0].start == 900 and out[0].end == 3500
+
+
+def test_collapse_leaves_a_genuine_repeat_alone():
+    cues = [_c(1, 0, 2000, "No!"), _c(2, 30000, 31000, "No!")]
+    out, merged = srt.collapse_duplicates(cues)
+    assert merged == 0 and len(out) == 2
+
+
+def test_collapse_ignores_markup_when_matching():
+    cues = [_c(1, 0, 2000, "<i>Hello.</i>"), _c(2, 100, 2100, "Hello.")]
+    out, merged = srt.collapse_duplicates(cues)
+    assert merged == 1 and out[0].text == "<i>Hello.</i>"
+
+
+def test_collapse_keeps_different_lines_that_overlap():
+    cues = [_c(1, 0, 2000, "Hello."), _c(2, 100, 2100, "Goodbye.")]
+    out, merged = srt.collapse_duplicates(cues)
+    assert merged == 0 and len(out) == 2

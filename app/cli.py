@@ -116,6 +116,8 @@ def analyze(cues) -> int:
     unique = len(send)
     batches = -(-unique // settings.batch_size) if unique else 0
     short = sum(1 for c in cues if c.duration and c.duration < 300)
+    stacked = srt.overlapping_duplicates(cues)
+    _, collapsible = srt.collapse_duplicates(cues)
 
     print(f"""
   total cues        {len(cues)}
@@ -123,13 +125,21 @@ def analyze(cues) -> int:
   repeats           {reused}      <- translated once, reused
   no text to send   {len(skip)}      <- symbols, numbers, blanks
   under 300ms       {short}      <- typically karaoke split per syllable
+  stacked repeats   {stacked}      <- repeat a line already on screen
+  collapsible       {collapsible}      <- merged away in the written file
 
   batches at BATCH_SIZE={settings.batch_size}: {batches}
+  cues written after collapsing: {len(cues) - collapsible}
 """, file=sys.stderr)
 
-    if len(cues) > 2000:
-        print("  This is far more than a normal episode (~350 cues) or film (~1200).\n"
-              "  The source is probably a fansub .ass with karaoke and signs.\n"
+    if stacked > len(cues) * 0.2:
+        print("  Most repeats overlap a line that is still on screen. That is an\n"
+              "  .ass with several styled layers flattened into SRT by ffmpeg -\n"
+              "  they would render stacked on top of each other. They are merged\n"
+              "  on write (COLLAPSE_DUPLICATES=false to keep them).\n", file=sys.stderr)
+    elif len(cues) > 2000:
+        print("  This is far more than a normal episode (~350 cues) or film (~1200),\n"
+              "  but the repeats do not overlap, so they look like genuine content.\n"
               "  Prefer a plain English sidecar for this title if one exists.\n",
               file=sys.stderr)
     return 0
