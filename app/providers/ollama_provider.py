@@ -49,6 +49,7 @@ class OllamaProvider(Provider):
         # Only reasoning models accept `think`; Ollama rejects it on the rest.
         # Assume it is wanted and drop it the first time a server objects.
         self._send_think = True
+        self._warned_ctx = False
 
     def structured(
         self,
@@ -95,13 +96,26 @@ class OllamaProvider(Provider):
             )
 
         body = response.json()
+        prompt_tokens = body.get("prompt_eval_count", 0) or 0
         self.usage.add(
             Usage(
-                input_tokens=body.get("prompt_eval_count", 0) or 0,
+                input_tokens=prompt_tokens,
                 output_tokens=body.get("eval_count", 0) or 0,
                 calls=1,
             )
         )
+
+        # Ollama truncates an over-long prompt silently - no error, just a
+        # shorter context and cues that come back missing. There is no flag for
+        # it, so the only signal is the prompt filling the window.
+        budget = self.options.get("num_ctx", 0)
+        if budget and prompt_tokens >= budget * 0.9 and not self._warned_ctx:
+            self._warned_ctx = True
+            log.warning(
+                "prompt is %d tokens against num_ctx=%d - Ollama may be silently "
+                "truncating it. Raise OLLAMA_NUM_CTX or lower BATCH_SIZE.",
+                prompt_tokens, budget,
+            )
 
         content = (body.get("message") or {}).get("content") or ""
         if not content.strip():

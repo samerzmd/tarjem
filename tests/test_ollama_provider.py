@@ -148,3 +148,25 @@ def test_a_non_think_error_is_not_swallowed_by_the_retry():
         call(provider(handler))
     assert "invalid format schema" in str(exc.value)
     assert not exc.value.retryable
+
+
+def test_warns_once_when_the_prompt_nearly_fills_the_context(caplog):
+    """Ollama truncates an over-long prompt silently; the only tell is the size."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=reply(json.dumps(CUES), prompt_eval_count=7800))
+
+    p = provider(handler, num_ctx=8192)
+    with caplog.at_level("WARNING"):
+        call(p)
+        call(p)
+    warnings = [r for r in caplog.records if "truncating" in r.message]
+    assert len(warnings) == 1          # noisy once, not every batch
+
+
+def test_no_warning_when_the_prompt_is_comfortable(caplog):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=reply(json.dumps(CUES), prompt_eval_count=2000))
+
+    with caplog.at_level("WARNING"):
+        call(provider(handler, num_ctx=8192))
+    assert not [r for r in caplog.records if "truncating" in r.message]
