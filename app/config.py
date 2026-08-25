@@ -65,6 +65,11 @@ class Settings:
     # flattened into SRT repeats each line on top of itself; left alone they
     # render stacked. Only overlapping repeats are touched.
     collapse_duplicates: bool = _bool("COLLAPSE_DUPLICATES", True)
+    # Drop <font face/size/color> that ffmpeg generates from .ass styling. The
+    # face is not installed on the player and the size came from the script's
+    # own resolution, so it renders wrong; it also wastes tokens and invites
+    # the model to mangle the tag. <i>/<b>/<u> are kept.
+    strip_style_tags: bool = _bool("STRIP_STYLE_TAGS", True)
 
     # --- model -----------------------------------------------------------
     provider: str = _str("LLM_PROVIDER", "anthropic")

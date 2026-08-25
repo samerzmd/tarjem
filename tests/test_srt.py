@@ -142,3 +142,43 @@ def test_collapse_keeps_different_lines_that_overlap():
     cues = [_c(1, 0, 2000, "Hello."), _c(2, 100, 2100, "Goodbye.")]
     out, merged = srt.collapse_duplicates(cues)
     assert merged == 0 and len(out) == 2
+
+
+# -- markup that ffmpeg generates from .ass --------------------------------
+# Seen in real output: {\an8} buried inside a <font> wrapper, and a font tag
+# split across a line break by the wrapper.
+
+def test_an_ass_tag_buried_inside_markup_is_lifted_to_the_front():
+    body, skin = srt.undress(r'<font size="72"><b>{\an8}Please try again.</b></font>')
+    assert r"{\an8}" not in body
+    assert skin.ass_prefix == r"{\an8}"
+    assert srt.dress("حاول مجددًا.", skin).startswith(r"{\an8}")
+
+
+def test_several_ass_tags_are_all_lifted_and_deduplicated():
+    body, skin = srt.undress(r"{\an8}{\pos(10,20)}Hi {\an8}there")
+    assert body == "Hi there"
+    assert skin.ass_prefix == r"{\an8}{\pos(10,20)}"
+
+
+def test_wrapping_never_splits_a_font_tag():
+    line = '<font size="20" color="#ffff00">' + "و" * 40 + " " + "ب" * 40 + "</font>"
+    out = srt.wrap(line, max_line=42, max_lines=2)
+    for part in out.split("\n"):
+        # a broken tag shows as an unbalanced angle bracket on one line
+        assert part.count("<") == part.count(">"), part
+
+
+def test_wrapping_keeps_a_long_tag_intact_even_when_it_exceeds_the_width():
+    line = '<font face="Some Very Long Font Name" size="72">Hi</font>'
+    out = srt.wrap(line, max_line=20, max_lines=2)
+    assert '<font face="Some Very Long Font Name" size="72">' in out
+
+
+def test_font_tags_are_stripped_but_emphasis_is_kept():
+    text = '<font face="Vesta" size="72" color="#ffeeee"><b><i>Hello</i></b></font>'
+    assert srt.strip_style_tags(text) == "<b><i>Hello</i></b>"
+
+
+def test_stripping_style_tags_leaves_plain_text_alone():
+    assert srt.strip_style_tags("Just words.") == "Just words."

@@ -17,7 +17,16 @@ BLOCK_SPLIT = re.compile(r"\n[ \t]*\n+")
 INDEX_RE = re.compile(r"^\s*\d+\s*$")
 
 # {\an8}, {\pos(..)} and friends: ASS override tags some releases smuggle into SRT.
-ASS_PREFIX_RE = re.compile(r"^(?:\{\\[^}]*\})+")
+# They can sit anywhere, including inside <font> markup that ffmpeg wrapped
+# around them, but they only mean anything at the very start of a cue.
+ASS_TAG_RE = re.compile(r"\{\\[^}]*\}")
+# ffmpeg turns .ass styling into <font face=".." size=".." color="..">. The
+# face is a font the player does not have and the size came from the script's
+# own resolution, so it renders wrong even when it renders at all.
+FONT_TAG_RE = re.compile(r"</?font[^>]*>", re.IGNORECASE)
+# Anything inside angle brackets is one unit and must never be split across
+# a line, however many spaces its attributes contain.
+TOKEN_RE = re.compile(r"<[^>]*>|\{\\[^}]*\}|\S+")
 ITALIC_WRAP_RE = re.compile(r"^<i>(?P<body>.*)</i>$", re.DOTALL | re.IGNORECASE)
 
 # Hearing-impaired furniture: "[door creaks]", "(sighs)", "MARGE: ".
@@ -131,16 +140,27 @@ class Skin:
 
 def undress(text: str) -> tuple[str, Skin]:
     skin = Skin(source_lines=max(1, len([ln for ln in text.split("\n") if ln.strip()])))
-    m = ASS_PREFIX_RE.match(text)
-    if m:
-        skin.ass_prefix = m.group(0)
-        text = text[m.end():]
+
+    # Lift every ASS override tag out, wherever it sits. ffmpeg often leaves
+    # them inside the <font> wrapper it generated, and a model asked to
+    # "preserve markup" faithfully keeps {\an8} in the middle of the line -
+    # where it positions nothing and simply shows up as literal text.
+    found = ASS_TAG_RE.findall(text)
+    if found:
+        skin.ass_prefix = "".join(dict.fromkeys(found))
+        text = ASS_TAG_RE.sub("", text)
+
     stripped = text.strip()
     m = ITALIC_WRAP_RE.match(stripped)
     if m and "<i>" not in m.group("body"):
         skin.italic = True
         text = m.group("body")
     return text.strip(), skin
+
+
+def strip_style_tags(text: str) -> str:
+    """Drop <font> wrappers, keeping <i>/<b>/<u> which mean the same everywhere."""
+    return FONT_TAG_RE.sub("", text)
 
 
 def dress(text: str, skin: Skin, max_line: int = 42, max_lines: int = 2) -> str:
@@ -177,7 +197,9 @@ def wrap(text: str, max_line: int = 42, max_lines: int = 2) -> str:
 def _split_line(line: str, max_line: int, max_parts: int) -> list[str]:
     if len(line) <= max_line or max_parts <= 1:
         return [line]
-    words = line.split(" ")
+    # Split on token boundaries, not on every space: `<font size="20"
+    # color="#ff0">` contains spaces but breaking it in half corrupts the tag.
+    words = TOKEN_RE.findall(line)
     if len(words) < 2:
         return [line]
     # Balance the halves rather than greedily filling the first line: a 40/4

@@ -82,6 +82,10 @@ class Pipeline:
         # Do this before translating, not after: an .ass flattened into SRT can
         # be 90% cues that sit on top of each other, and carrying them through
         # the whole pipeline only to drop them at the end wastes the bookkeeping.
+        if self.cfg.strip_style_tags:
+            for cue in cues:
+                cue.text = srt.strip_style_tags(cue.text)
+
         if self.cfg.collapse_duplicates:
             cues, merged = srt.collapse_duplicates(cues)
             if merged:
