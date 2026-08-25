@@ -215,3 +215,69 @@ def test_dashboard_shows_the_rush_control(client):
     page = client.get("/?token=secret").text
     assert "Translate now on Claude" in page
     assert "rushPath()" in page
+
+
+# -- library: browse everything still missing Arabic ----------------------
+
+def test_library_page_requires_auth(client):
+    r = client.get("/library", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/login"
+
+
+def test_library_page_renders_when_authenticated(client):
+    page = client.get("/library?token=secret")
+    assert page.status_code == 200
+    assert "library" in page.text and "api/library" in page.text
+
+
+def test_library_api_lists_candidates(client, tmp_path, monkeypatch):
+    from app import main as m
+    video = tmp_path / "Some Show" / "Season 1" / "Ep01.mkv"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"x")
+
+    monkeypatch.setattr(
+        m.state["sweeper"], "candidates",
+        lambda: ([{"video": video, "title": "Some Show - Ep01", "key": "Some Show"}], "disk"),
+    )
+    m.state.pop("library", None)
+
+    d = client.get("/api/library", headers={"x-api-token": "secret"}).json()
+    assert d["source"] == "disk" and d["total"] == 1
+    item = d["items"][0]
+    assert item["title"] == "Some Show - Ep01"
+    assert item["translated"] is False and item["pending"] is False
+
+
+def test_library_marks_already_translated_items(client, tmp_path, monkeypatch):
+    from app import main as m
+    video = tmp_path / "Done Show" / "Season 1" / "Ep02.mkv"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"x")
+    (video.parent / "Ep02.ar.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nx\n")
+
+    monkeypatch.setattr(
+        m.state["sweeper"], "candidates",
+        lambda: ([{"video": video, "title": "Done Show", "key": "Done Show"}], "disk"),
+    )
+    m.state.pop("library", None)
+
+    item = client.get("/api/library", headers={"x-api-token": "secret"}).json()["items"][0]
+    assert item["translated"] is True
+
+
+def test_library_filters_by_query(client, tmp_path, monkeypatch):
+    from app import main as m
+    made = []
+    for name in ("Alpha", "Beta"):
+        v = tmp_path / name / "Season 1" / f"{name}.mkv"
+        v.parent.mkdir(parents=True)
+        v.write_bytes(b"x")
+        made.append({"video": v, "title": name, "key": name})
+
+    monkeypatch.setattr(m.state["sweeper"], "candidates", lambda: (made, "disk"))
+    m.state.pop("library", None)
+
+    d = client.get("/api/library?q=alpha", headers={"x-api-token": "secret"}).json()
+    assert d["total"] == 1 and d["items"][0]["title"] == "Alpha"
+    m.state.pop("library", None)

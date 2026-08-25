@@ -287,11 +287,22 @@ class Sweeper(threading.Thread):
                 log.exception("sweep failed")
             self._wake.wait(max(60, self.cfg.sweep_interval_min * 60))
 
+    def candidates(self) -> tuple[list[dict], str]:
+        """Everything still missing the target language, and where the list came from.
+
+        Bazarr knows this already and respects the language profiles and
+        exclusions, so it is preferred; walking the disk is the fallback for
+        when there is no API key.
+        """
+        if self.cfg.sweep_source == "bazarr":
+            found = self._from_bazarr()
+            if found:
+                return found, "bazarr"
+        return self._from_disk(), "disk"
+
     def sweep(self, limit: int | None = None) -> dict:
         limit = limit or self.cfg.sweep_limit
-        candidates = self._from_bazarr() if self.cfg.sweep_source == "bazarr" else []
-        if not candidates:
-            candidates = self._from_disk()
+        candidates, _ = self.candidates()
 
         queued = 0
         for cand in candidates:

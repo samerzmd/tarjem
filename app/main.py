@@ -299,7 +299,54 @@ def rush(job_id: int, provider: str = Query(default="anthropic")) -> dict:
 
 @app.post("/sweep", dependencies=[Depends(auth)])
 def sweep(limit: int = Query(default=0, ge=0, le=1000)) -> dict:
+    state.pop("library", None)          # the queue just changed; re-read it
     return state["sweeper"].sweep(limit or None)
+
+
+LIBRARY_TTL = 300
+
+
+def _library(refresh: bool = False) -> tuple[list[dict], str]:
+    """Everything still missing Arabic, cached briefly.
+
+    Asking Bazarr means an API round-trip per 50 items and the disk fallback
+    walks the whole library, so a page refresh should not redo it.
+    """
+    cached = state.get("library")
+    if cached and not refresh and time.time() - cached["at"] < LIBRARY_TTL:
+        return cached["items"], cached["source"]
+
+    candidates, source = state["sweeper"].candidates()
+    db = store()
+    items = []
+    for cand in candidates:
+        video = cand["video"]
+        path = str(video)
+        items.append({
+            "video": path,
+            "title": cand["title"],
+            "series": cand["key"],
+            "name": video.name,
+            "translated": sources.has_target(video, settings) is not None,
+            "pending": db.is_pending(path),
+        })
+    items.sort(key=lambda i: (i["series"].lower(), i["name"].lower()))
+    state["library"] = {"items": items, "source": source, "at": time.time()}
+    return items, source
+
+
+@app.get("/api/library", dependencies=[Depends(auth)])
+def api_library(
+    q: str = Query(default=""),
+    limit: int = Query(default=500, ge=1, le=5000),
+    refresh: bool = Query(default=False),
+) -> dict:
+    items, source = _library(refresh)
+    if q:
+        needle = q.casefold()
+        items = [i for i in items if needle in i["title"].casefold()
+                 or needle in i["name"].casefold()]
+    return {"source": source, "total": len(items), "items": items[:limit]}
 
 
 @app.get("/jobs", dependencies=[Depends(auth)])
@@ -381,7 +428,7 @@ PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
  .hint{{color:#7b8494;font-size:12px;margin-top:6px}}
  #msg{{margin-left:10px;font-size:12px}}
 </style></head><body>
-<h1>tarjem {logout}</h1>
+<h1>tarjem <a href="/library" style="font-size:12px">library &rarr;</a> {logout}</h1>
 <div class="sub">{provider} &middot; {model} &middot; {target}/{register} &middot; bazarr {bazarr}</div>
 <div style="margin-bottom:16px">{pills}</div>
 
@@ -433,6 +480,98 @@ async function rushJob(btn, id) {{
 }}
 </script>
 </body></html>"""
+
+
+LIBRARY_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>tarjem library</title><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ body{{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:#14161a;
+      color:#d8dee9;margin:0;padding:24px}}
+ h1{{font-size:18px;margin:0 0 4px}} a{{color:#88c0d0}}
+ .sub{{color:#7b8494;margin-bottom:18px}}
+ table{{border-collapse:collapse;width:100%;font-size:13px}}
+ th,td{{text-align:left;padding:6px 10px;border-bottom:1px solid #262a31}}
+ th{{color:#7b8494;font-weight:500;position:sticky;top:0;background:#14161a}}
+ .path{{color:#8fbcbb;font-size:12px}}
+ .done{{color:#a3be8c}} .pending{{color:#ebcb8b}} .missing{{color:#7b8494}}
+ button{{font:inherit;font-size:12px;background:#3b4252;color:#e5e9f0;border:1px solid #4c566a;
+        border-radius:4px;padding:3px 8px;cursor:pointer;margin-right:4px}}
+ button:hover{{background:#4c566a}} button:disabled{{opacity:.45;cursor:default}}
+ button.claude{{border-color:#5e81ac}}
+ input{{font:inherit;font-size:13px;background:#1b1f26;color:#d8dee9;border:1px solid #3b4252;
+       border-radius:4px;padding:6px 9px;width:340px;max-width:55vw}}
+ .bar{{margin-bottom:16px}} #msg{{margin-left:10px;font-size:12px}}
+</style></head><body>
+<h1>library <a href="/" style="font-size:12px">&larr; jobs</a></h1>
+<div class="sub">{total} items missing {target}, via {source}{stale}</div>
+<div class="bar">
+  <input id="q" placeholder="filter by title or filename" oninput="render()">
+  <button onclick="load(true)">refresh</button>
+  <span id="msg"></span>
+</div>
+<table><thead><tr><th>show / film</th><th>file</th><th>state</th><th></th></tr></thead>
+<tbody id="rows"></tbody></table>
+<script>
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
+const hdrs = TOKEN ? {{"x-api-token": TOKEN, "Content-Type": "application/json"}}
+                   : {{"Content-Type": "application/json"}};
+let ITEMS = [];
+function say(t, ok) {{
+  const m = document.getElementById("msg");
+  m.textContent = t; m.style.color = ok ? "#a3be8c" : "#bf616a";
+}}
+function esc(s) {{ return s.replace(/[&<>"]/g, c =>
+  ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}})[c]); }}
+async function load(refresh) {{
+  say(refresh ? "rescanning..." : "loading...", true);
+  const r = await fetch("/api/library?limit=2000" + (refresh ? "&refresh=true" : ""),
+                        {{headers: hdrs}});
+  if (!r.ok) return say("not authorised - open this page with ?token=...", false);
+  const d = await r.json();
+  ITEMS = d.items; say(`${{d.total}} items`, true); render();
+}}
+function render() {{
+  const q = document.getElementById("q").value.trim().toLowerCase();
+  const rows = ITEMS.filter(i => !q || i.title.toLowerCase().includes(q)
+                                    || i.name.toLowerCase().includes(q));
+  document.getElementById("rows").innerHTML = rows.slice(0, 800).map(i => {{
+    const state = i.translated ? '<span class="done">translated</span>'
+                : i.pending    ? '<span class="pending">queued</span>'
+                :                '<span class="missing">missing</span>';
+    const dis = (i.translated || i.pending) ? "disabled" : "";
+    return `<tr><td>${{esc(i.title)}}</td>
+      <td class="path">${{esc(i.name)}}</td><td>${{state}}</td>
+      <td><button ${{dis}} onclick="go(this,'${{encodeURIComponent(i.video)}}',false)">local</button>
+      <button class="claude" ${{dis}}
+        onclick="go(this,'${{encodeURIComponent(i.video)}}',true)">Claude</button></td></tr>`;
+  }}).join("") || '<tr><td colspan="4">nothing matches</td></tr>';
+}}
+async function go(btn, video, claude) {{
+  btn.disabled = true; say("queueing...", true);
+  const body = {{video: decodeURIComponent(video)}};
+  if (claude) {{ body.provider = "anthropic"; body.rush = true; }}
+  const r = await fetch("/translate", {{method: "POST", headers: hdrs,
+                                        body: JSON.stringify(body)}});
+  const d = await r.json().catch(() => ({{}}));
+  if (!r.ok) {{ btn.disabled = false; return say(d.detail || r.status, false); }}
+  say(d.queued ? `queued as job ${{d.job}}` : d.reason, d.queued);
+}}
+load(false);
+</script></body></html>"""
+
+
+@app.get("/library", response_class=HTMLResponse)
+def library_page(request: Request):
+    if not auth_mod.authenticated(settings, request):
+        return RedirectResponse("/login", status_code=303)
+    cached = state.get("library")
+    age = int(time.time() - cached["at"]) if cached else 0
+    return LIBRARY_PAGE.format(
+        total=len(cached["items"]) if cached else "&hellip;",
+        target=settings.target_lang,
+        source=cached["source"] if cached else "&hellip;",
+        stale=f" &middot; cached {age}s ago" if cached else "",
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
