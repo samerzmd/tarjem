@@ -192,8 +192,17 @@ a film. A film takes a few minutes. `LLM_EFFORT=low` is the default because
 translation isn't a reasoning task, and the rules plus glossary sit in a cached
 prompt prefix, so most per-batch input bills at the cache-read rate.
 
-**Self-hosted.** Free, and much slower than people expect. The arithmetic that
-matters is tokens per second, and it is worth measuring before committing:
+**Self-hosted.** Free, and much slower than people expect.
+
+With Ollama, use `LLM_PROVIDER=ollama` rather than pointing the OpenAI-compatible
+provider at `/v1`. Ollama's `/v1` shim silently ignores `think: false`, so a
+reasoning model such as qwen3 spends most of its output budget on a scratchpad
+before it starts translating — measured at roughly **ten times** the tokens for
+the same result. The native provider also passes the schema to `format`, which
+constrains decoding instead of just asking nicely for JSON.
+
+The arithmetic that matters is tokens per second, and it is worth measuring
+before committing:
 
 ```bash
 curl -s http://YOUR-OLLAMA:11434/api/generate -d '{"model":"qwen3:14b",

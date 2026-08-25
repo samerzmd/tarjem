@@ -9,7 +9,17 @@ def build_provider(cfg: Settings) -> Provider:
         from .anthropic_provider import AnthropicProvider
 
         return AnthropicProvider(api_key=cfg.anthropic_api_key, model=cfg.model, effort=cfg.effort)
-    if cfg.provider in ("openai", "openai-compatible", "ollama", "local"):
+    if cfg.provider in ("ollama", "local"):
+        from .ollama_provider import OllamaProvider
+
+        return OllamaProvider(
+            base_url=cfg.ollama_url,
+            model=cfg.ollama_model,
+            timeout=float(cfg.llm_timeout),
+            num_ctx=cfg.ollama_num_ctx,
+            options=cfg.extra_body,
+        )
+    if cfg.provider in ("openai", "openai-compatible"):
         from .openai_provider import OpenAIProvider
 
         return OpenAIProvider(

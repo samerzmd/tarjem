@@ -76,6 +76,11 @@ class Settings:
     openai_api_key: str = _str("OPENAI_API_KEY")
     openai_base_url: str = _str("OPENAI_BASE_URL", "https://api.openai.com/v1")
     openai_model: str = _str("OPENAI_MODEL", "gpt-4.1")
+    ollama_url: str = _str("OLLAMA_URL", "http://localhost:11434")
+    ollama_model: str = _str("OLLAMA_MODEL", "qwen3:14b")
+    # Ollama's default context is small enough that a batch plus its glossary
+    # can overflow it, and an overflow silently truncates the prompt.
+    ollama_num_ctx: int = _int("OLLAMA_NUM_CTX", 8192)
     # Self-hosted models can take minutes per batch on CPU.
     llm_timeout: int = _int("LLM_TIMEOUT", 1800)
     # Raw JSON merged into the request body - for server-specific switches such
