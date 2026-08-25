@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import srt, worker  # noqa: E402
+from app import sources, srt, worker  # noqa: E402
 from app.config import Settings  # noqa: E402
 from app.store import DONE, FAILED, SKIPPED, Store  # noqa: E402
 from tests.test_translate import StubProvider  # noqa: E402
@@ -156,3 +156,44 @@ def test_glossary_is_reused_across_episodes(rig, tmp_path):
 
     # One glossary built, stored under the show, and reused for the second episode.
     assert [g["key"] for g in store.glossaries()] == ["The Expanse"]
+
+
+class DeadProvider(StubProvider):
+    """Every batch fails - e.g. the model name is wrong or the server is down."""
+
+    def structured(self, system, user, schema_model, max_tokens=16000):
+        self.calls += 1
+        from app.providers.base import ProviderError
+        raise ProviderError("model not found", retryable=False)
+
+
+def test_a_file_where_nothing_translated_fails_and_writes_no_file(rig, tmp_path, monkeypatch):
+    """The worst outcome is a .ar.srt full of untranslated English: it looks
+    like success, and it blocks every retry because the target now exists."""
+    cfg, store, _bazarr, _provider, pipeline = rig
+    monkeypatch.setattr(worker, "build_provider", lambda _cfg: DeadProvider())
+    video = make_media(tmp_path)
+
+    job_id = store.enqueue(str(video), "", "", "sweep")
+    pipeline.run(dict(store.claim_next()))
+
+    job = store.get(job_id)
+    assert job["status"] == FAILED
+    assert "0 of" in job["error"]
+    assert not (video.parent / "The.Expanse.S02E03.1080p.ar.srt").exists()
+    # and nothing was left behind to block a retry
+    assert sources.has_target(video, cfg) is None
+
+
+def test_a_partial_failure_still_writes_what_it_got(rig, tmp_path, monkeypatch):
+    cfg, store, _bazarr, _provider, pipeline = rig
+    monkeypatch.setattr(worker, "build_provider", lambda _cfg: StubProvider(drop={0, 1}))
+    video = make_media(tmp_path)
+
+    job_id = store.enqueue(str(video), "", "", "sweep")
+    pipeline.run(dict(store.claim_next()))
+
+    job = store.get(job_id)
+    assert job["status"] == DONE
+    assert job["stats"]["untranslated"] == 2
+    assert (video.parent / "The.Expanse.S02E03.1080p.ar.srt").is_file()

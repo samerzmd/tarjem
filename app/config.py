@@ -121,6 +121,20 @@ class Settings:
         return REGISTERS.get(self.register.lower(), REGISTERS["msa"])
 
     @property
+    def active_model(self) -> str:
+        """The model actually in use, for logs, /health and provenance.
+
+        Each provider reads its own setting, so anything that reports "the
+        model" has to resolve it the same way build_provider does - otherwise
+        the dashboard confidently displays a model that is never called.
+        """
+        if self.provider in ("ollama", "local"):
+            return self.ollama_model
+        if self.provider in ("openai", "openai-compatible"):
+            return self.openai_model
+        return self.model
+
+    @property
     def extra_body(self) -> dict:
         if not self.llm_extra_body:
             return {}

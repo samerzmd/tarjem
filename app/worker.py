@@ -96,6 +96,22 @@ class Pipeline:
 
             translated, stats = translator.translate(cues, title, glossary, progress)
 
+            # A file where nothing translated is a failure, not a result. Writing
+            # it would put the untranslated source under an .ar.srt name, which
+            # then blocks every retry because the target "already exists".
+            if stats.translated == 0:
+                self.store.finish(
+                    job_id, FAILED,
+                    error=f"every batch failed - 0 of {stats.total} cues translated. "
+                          f"Check the provider is reachable and the model name is right.",
+                    stats=stats.as_dict(), usage=provider.usage.as_dict(),
+                )
+                return
+
+            if stats.untouched:
+                log.warning("job %s: %d of %d cues fell back to source text",
+                            job_id, stats.untouched, stats.total)
+
             if self.cfg.dry_run:
                 self.store.finish(job_id, DONE, stage="dry run - nothing written",
                                   stats=stats.as_dict(), usage=provider.usage.as_dict())
@@ -154,7 +170,7 @@ class Pipeline:
                     "translated_from": source.lang or "unknown",
                     "source": f"{source.origin}: {source.detail}",
                     "provider": self.cfg.provider,
-                    "model": self.cfg.model if self.cfg.provider == "anthropic" else self.cfg.openai_model,
+                    "model": self.cfg.active_model,
                     "register": self.cfg.register,
                     "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 }, indent=2), encoding="utf-8")

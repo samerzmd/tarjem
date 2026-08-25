@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
 
     state.update(store=store, bazarr=bazarr, workers=workers, sweeper=sweeper, started=time.time())
     log.info("tarjem up | provider=%s model=%s target=%s register=%s",
-             settings.provider, settings.model, settings.target_lang, settings.register)
+             settings.provider, settings.active_model, settings.target_lang, settings.register)
     if not bazarr.ping():
         log.warning("Bazarr not reachable at %s - webhook still works, sweeping will not",
                     settings.bazarr_url)
@@ -87,7 +87,7 @@ def health() -> dict:
         "status": "ok",
         "uptime_s": round(time.time() - state["started"]),
         "provider": settings.provider,
-        "model": settings.model if settings.provider == "anthropic" else settings.openai_model,
+        "model": settings.active_model,
         "target_lang": settings.target_lang,
         "register": settings.register,
         "bazarr": state["bazarr"].ping(),
@@ -302,7 +302,7 @@ def dashboard() -> str:
 
     return PAGE.format(
         provider=settings.provider,
-        model=settings.model if settings.provider == "anthropic" else settings.openai_model,
+        model=settings.active_model,
         target=settings.target_lang,
         register=settings.register,
         bazarr="ok" if state["bazarr"].ping() else "unreachable",
