@@ -45,6 +45,16 @@ def main(argv: list[str] | None = None) -> int:
         settings.model = args.model
         settings.openai_model = args.model
 
+    if not args.input.exists():
+        print(f"no such file: {args.input}", file=sys.stderr)
+        if any(ch in str(args.input) for ch in "<>"):
+            print("(that looks like an unfilled placeholder - substitute a real path)",
+                  file=sys.stderr)
+        return 2
+    if not args.input.is_file():
+        print(f"not a file: {args.input}", file=sys.stderr)
+        return 2
+
     if args.from_video:
         found = sources.find_source(args.input, settings)
         if not found:
@@ -53,7 +63,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"source: {found.origin} - {found.detail}", file=sys.stderr)
         text = found.text
     else:
-        text = srt.decode(args.input.read_bytes())
+        try:
+            text = srt.decode(args.input.read_bytes())
+        except OSError as exc:
+            print(f"cannot read {args.input}: {exc}", file=sys.stderr)
+            return 2
 
     cues = srt.parse(text)
     if not cues:

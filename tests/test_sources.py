@@ -110,3 +110,9 @@ def test_display_title_strips_release_noise():
     title = display_title(Path("/media/movies/Dune (2021)/Dune.2021.2160p.WEB-DL.x265-GRP.mkv"))
     assert "2160p" not in title and "x265" not in title
     assert "Dune" in title
+
+
+def test_find_source_on_a_missing_video_returns_none(cfg, tmp_path):
+    """It used to fall through to the whisper fallback and crash on open()."""
+    cfg.whisper_url = "http://whisper:9000"
+    assert sources.find_source(tmp_path / "nope.mkv", cfg) is None

@@ -74,6 +74,9 @@ def glob_escape(text: str) -> str:
 
 
 def find_source(video: Path, cfg: Settings, subtitle_hint: str | None = None) -> SubtitleSource | None:
+    if not video.is_file():
+        log.error("no such video: %s", video)
+        return None
     if subtitle_hint:
         hinted = Path(cfg.to_local(subtitle_hint))
         if hinted.is_file():
@@ -247,6 +250,9 @@ def _whisper(video: Path, cfg: Settings) -> SubtitleSource | None:
         text = response.text
     except httpx.RequestError as exc:
         log.warning("whisper unreachable: %s", exc)
+        return None
+    except OSError as exc:
+        log.warning("cannot read %s for transcription: %s", video, exc)
         return None
 
     if len(srt.parse(text)) < 5:
