@@ -81,7 +81,7 @@ class Settings:
     openai_base_url: str = _str("OPENAI_BASE_URL", "https://api.openai.com/v1")
     openai_model: str = _str("OPENAI_MODEL", "gpt-4.1")
     ollama_url: str = _str("OLLAMA_URL", "http://localhost:11434")
-    ollama_model: str = _str("OLLAMA_MODEL", "qwen3:14b")
+    ollama_model: str = _str("OLLAMA_MODEL", "command-r7b-arabic")
     # Ollama's default context is small enough that a batch plus its glossary
     # can overflow it, and an overflow silently truncates the prompt.
     ollama_num_ctx: int = _int("OLLAMA_NUM_CTX", 8192)

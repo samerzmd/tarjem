@@ -231,11 +231,19 @@ and it is slower too — so reach for a specialist before reaching for parameter
 
 | Model | Size | Note |
 |---|---|---|
-| `command-r7b-arabic` | 7B | Cohere, built for Arabic. Small enough to be quick |
+| `command-r7b-arabic` | 8B | Cohere, built for Arabic. The default here |
 | `emr/silma-9b-instruct` | 9B | SILMA.AI, Arabic-focused |
 | `iKhalid/ALLaM` | 7B | Saudi NCAI, trained for Arabic |
 | `qwen3:14b` | 14B | Genuinely multilingual, but a generalist |
 | `llama3.1:8b` | 8B | Weak Arabic — avoid for this |
+
+Measured on one CPU-only box, same 8 cues, same prompt — the specialist won on
+both axes at once, which is the general shape of this trade:
+
+| | `qwen3:14b` | `command-r7b-arabic` |
+|---|---|---|
+| Generation | 1.44 tok/s | **2.68 tok/s** |
+| Grammar/meaning errors | 4 of 8 cues | **1 of 8** |
 
 Mixture-of-experts models (`qwen3:30b-a3b`, `glm-4.7-flash`) activate a fraction
 of their weights per token, so they can be *faster* on CPU than a dense model

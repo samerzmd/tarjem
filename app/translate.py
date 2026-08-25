@@ -117,36 +117,38 @@ bare numbers, and codes. Return them unchanged rather than inventing a translati
 # than trusting the model to remember its own rules. Prompt tokens are processed
 # several times faster than they are generated, so this is cheap insurance.
 ARABIC_MECHANICS = """\
-ARABIC MECHANICS - check every line against these before you emit it:
+ARABIC MECHANICS
 
-* NUMBER AGREEMENT REVERSES for 3-10. A masculine plural noun takes the
-  feminine numeral and vice versa: ثلاثة أيام (not ثلاث أيام), ثلاث سنوات
-  (not ثلاثة سنوات), خمسة رجال, خمس نساء.
+Below is a table of mistakes that are made constantly in machine-translated
+Arabic subtitles. The left column is always wrong. Never emit anything in it.
 
-* DEMONSTRATIVES AGREE WITH THE NOUN'S GENDER, not with English intuition.
-  الشتاء and الصيف are masculine: ذلك الشتاء, not تلك الشتاء.
+  WRONG                     CORRECT                  WHY
+  ثلاث أيام                  ثلاثة أيام                numerals 3-10 reverse gender
+  ثلاثة سنوات                ثلاث سنوات                same rule, other direction
+  خمس رجال                   خمسة رجال                 same rule
+  تلك الشتاء                 ذلك الشتاء                الشتاء is masculine
+  هذه الصيف                  هذا الصيف                 الصيف is masculine
+  يا القائد                  أيها القائد               يا never takes الـ
+  يا الطبيبة                 أيتها الطبيبة             feminine form
+  لم تعد تعود                لم تعد                    لم already carries the past
+  لم يذهب ذهب                لم يذهب                   one verb, not two
+  لم تعود                    لم تعد                    لم takes the jussive
+  لم يذهبون                  لم يذهبوا                 same rule, plural
+  السفينة غادرت              فات الأوان                "that ship has sailed"
+  اذهب! (for "get down")     انبطح! / انخفض!           it means take cover
+  راقبته (for "chasing")     طاردته / لاحقته           pursuit, not surveillance
+  أمسك (for "hold on")       انتظر / اصمد              unless gripping something
+  إنه على لي                على حسابي                 "it's on me"
 
-* VOCATIVE. A definite noun takes أيها / أيتها, never يا with the article:
-  أيها القائد (not يا القائد), أيتها الطبيبة. يا is for names and indefinites:
-  يا أحمد, يا رجل.
+Two habits behind most of these:
 
-* NO DOUBLED NEGATION OR TENSE. لم already carries the past: لم تعد (not
-  لم تعد تعود). Pick one construction and finish it.
+* An idiom is translated by MEANING, then rendered in the Arabic a speaker
+  would actually use. A word-for-word idiom is a mistranslation even when
+  every individual word is correct.
+* A verb is chosen for what physically happens in the scene, not for the
+  dictionary gloss of the English word.
 
-* IDIOMS ARE NEVER CALQUED. Translate what the line means, then find the
-  Arabic that a speaker would actually use:
-    "that ship has sailed"      -> فات الأوان
-    "get down!" (take cover)    -> انبطح! / انخفض!
-    "hang in there"             -> اصمد
-    "it's on me"                -> على حسابي
-  A word-for-word rendering of an idiom is a mistranslation even when every
-  individual word is right.
-
-* PHYSICAL COMMANDS DESCRIBE THE ACTUAL ACTION. "Get down" is not اذهب.
-  "Hold on" is not أمسك unless someone is gripping something.
-
-* VERB CHOICE CARRIES INTENT. "Chasing someone" is يطارد / يلاحق - pursuit.
-  It is not يراقب, which is surveillance.
+يا is correct only before a name or an indefinite noun: يا أحمد, يا رجل.
 """
 
 GLOSSARY_PROMPT = """\
