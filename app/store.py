@@ -7,6 +7,7 @@ drift halfway through a season.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -32,12 +33,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     bz_kind      TEXT DEFAULT '',
     bz_series_id INTEGER DEFAULT 0,
     bz_item_id   INTEGER DEFAULT 0,
+    provider     TEXT DEFAULT '',
+    priority     INTEGER DEFAULT 0,
     created_at   REAL NOT NULL,
     started_at   REAL,
     finished_at  REAL
 );
-CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status);
-CREATE INDEX IF NOT EXISTS jobs_video  ON jobs(video);
 
 CREATE TABLE IF NOT EXISTS glossaries (
     key        TEXT PRIMARY KEY,
@@ -45,6 +46,15 @@ CREATE TABLE IF NOT EXISTS glossaries (
     created_at REAL NOT NULL
 );
 """
+
+# Indexes go in after the column migration: one of them names `priority`, which
+# an older database does not have yet.
+INDEXES = """
+CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, priority DESC, id);
+CREATE INDEX IF NOT EXISTS jobs_video  ON jobs(video);
+"""
+
+log = logging.getLogger(__name__)
 
 QUEUED, RUNNING, DONE, FAILED, SKIPPED = "queued", "running", "done", "failed", "skipped"
 ACTIVE = (QUEUED, RUNNING)
@@ -59,12 +69,33 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         with self._lock:
             self._db.executescript(SCHEMA)
+            self._migrate()
+            self._db.executescript(INDEXES)
             # A restart mid-job would otherwise leave a permanent "running" row.
             self._db.execute(
                 "UPDATE jobs SET status=?, error=? WHERE status=?",
                 (FAILED, "interrupted by restart", RUNNING),
             )
             self._db.commit()
+
+    def _migrate(self) -> None:
+        """Add columns a previous version's database is missing.
+
+        CREATE TABLE IF NOT EXISTS silently does nothing when the table already
+        exists, so a new column has to be added explicitly or every query
+        against it fails on an upgraded install.
+        """
+        have = {r["name"] for r in self._db.execute("PRAGMA table_info(jobs)")}
+        for name, ddl in (
+            ("bz_kind", "TEXT DEFAULT ''"),
+            ("bz_series_id", "INTEGER DEFAULT 0"),
+            ("bz_item_id", "INTEGER DEFAULT 0"),
+            ("provider", "TEXT DEFAULT ''"),
+            ("priority", "INTEGER DEFAULT 0"),
+        ):
+            if name not in have:
+                self._db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {ddl}")
+                log.info("migrated jobs table: added %s", name)
 
     # -- jobs -------------------------------------------------------------
 
@@ -77,6 +108,8 @@ class Store:
         bz_kind: str = "",
         bz_series_id: int = 0,
         bz_item_id: int = 0,
+        provider: str = "",
+        priority: int = 0,
     ) -> int | None:
         """Queue a video. Returns None if it is already queued or running."""
         with self._lock:
@@ -87,18 +120,27 @@ class Store:
                 return None
             cur = self._db.execute(
                 "INSERT INTO jobs (video,title,series_key,status,trigger,"
-                "bz_kind,bz_series_id,bz_item_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                "bz_kind,bz_series_id,bz_item_id,provider,priority,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (video, title, series_key, QUEUED, trigger,
-                 bz_kind, bz_series_id, bz_item_id, time.time()),
+                 bz_kind, bz_series_id, bz_item_id, provider, priority, time.time()),
             )
             self._db.commit()
             return int(cur.lastrowid)
 
-    def claim_next(self) -> sqlite3.Row | None:
+    def claim_next(self, priority_only: bool = False) -> sqlite3.Row | None:
+        """Take the next job. Rush jobs first, oldest first within a priority.
+
+        ``priority_only`` is for the rush lane: it uses a different provider, so
+        it must not sit behind a local job that has hours left to run.
+        """
+        query = "SELECT * FROM jobs WHERE status=?"
+        params: tuple = (QUEUED,)
+        if priority_only:
+            query += " AND priority > 0"
+        query += " ORDER BY priority DESC, id LIMIT 1"
         with self._lock:
-            row = self._db.execute(
-                "SELECT * FROM jobs WHERE status=? ORDER BY id LIMIT 1", (QUEUED,)
-            ).fetchone()
+            row = self._db.execute(query, params).fetchone()
             if not row:
                 return None
             self._db.execute(
@@ -159,18 +201,21 @@ class Store:
             ).fetchone()
         return row is not None
 
-    def requeue(self, job_id: int) -> bool:
+    def requeue(self, job_id: int, provider: str = "", priority: int = 0) -> int | None:
+        """Queue the same video again, optionally on a different provider."""
         with self._lock:
             row = self._db.execute(
                 "SELECT video,title,series_key,bz_kind,bz_series_id,bz_item_id "
                 "FROM jobs WHERE id=?", (job_id,)
             ).fetchone()
         if not row:
-            return False
+            return None
         return self.enqueue(
-            row["video"], row["title"], row["series_key"], "retry",
+            row["video"], row["title"], row["series_key"],
+            "rush" if priority else "retry",
             row["bz_kind"], row["bz_series_id"], row["bz_item_id"],
-        ) is not None
+            provider, priority,
+        )
 
     # -- glossaries -------------------------------------------------------
 

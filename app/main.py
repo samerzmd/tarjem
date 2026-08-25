@@ -31,6 +31,10 @@ async def lifespan(app: FastAPI):
     bazarr = BazarrClient(settings)
     workers = [Worker(settings, store, bazarr, name=f"worker-{i + 1}")
                for i in range(max(1, settings.workers))]
+    # A lane of its own for rush jobs. They run on whichever provider the
+    # request named - usually a cloud one - so they don't contend for the same
+    # hardware as the local model, and shouldn't wait behind it either.
+    workers.append(Worker(settings, store, bazarr, name="rush", priority_only=True))
     for worker in workers:
         worker.start()
 
@@ -74,6 +78,33 @@ class TranslateRequest(BaseModel):
     subtitle: str | None = None
     title: str | None = None
     force: bool = False
+    # Run this one job somewhere other than the configured default - e.g.
+    # "anthropic" for an episode you want tonight rather than in two hours.
+    provider: str | None = None
+    rush: bool = False
+
+
+KNOWN_PROVIDERS = ("anthropic", "openai", "openai-compatible", "ollama", "local")
+
+
+def _check_provider(name: str | None) -> str:
+    """Reject an unusable provider now, rather than after the job is queued."""
+    if not name:
+        return ""
+    name = name.strip().lower()
+    if name not in KNOWN_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown provider '{name}' - one of {', '.join(KNOWN_PROVIDERS)}",
+        )
+    if name == "anthropic" and not settings.anthropic_api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="ANTHROPIC_API_KEY is not set, so the anthropic provider cannot run",
+        )
+    if name in ("openai", "openai-compatible") and not settings.openai_api_key:
+        raise HTTPException(status_code=400, detail="OPENAI_API_KEY is not set")
+    return name
 
 
 # --------------------------------------------------------------------------
@@ -178,14 +209,30 @@ def translate(req: TranslateRequest) -> JSONResponse:
     if existing and req.force:
         existing.rename(existing.with_suffix(existing.suffix + ".bak"))
 
+    provider = _check_provider(req.provider)
     job_id = store().enqueue(
-        str(video), req.title or display_title(video), series_key(video), trigger="manual"
+        str(video), req.title or display_title(video), series_key(video),
+        "rush" if req.rush else "manual",
+        provider=provider, priority=1 if req.rush else 0,
     )
     if job_id is None:
         return JSONResponse({"queued": False, "reason": "already queued"})
     if req.subtitle:
         store().update(job_id, detail=req.subtitle)
-    return JSONResponse({"queued": True, "job": job_id})
+    return JSONResponse({
+        "queued": True, "job": job_id,
+        "provider": provider or settings.provider, "rush": req.rush,
+    })
+
+
+@app.post("/jobs/{job_id}/rush", dependencies=[Depends(auth)])
+def rush(job_id: int, provider: str = Query(default="anthropic")) -> dict:
+    """Re-run a job now, on a faster provider, ahead of the queue."""
+    name = _check_provider(provider)
+    new_id = store().requeue(job_id, provider=name, priority=1)
+    if new_id is None:
+        raise HTTPException(status_code=404, detail="no such job, or it is already queued")
+    return {"queued": True, "job": new_id, "provider": name}
 
 
 @app.post("/sweep", dependencies=[Depends(auth)])
@@ -208,9 +255,10 @@ def job(job_id: int) -> dict:
 
 @app.post("/jobs/{job_id}/retry", dependencies=[Depends(auth)])
 def retry(job_id: int) -> dict:
-    if not store().requeue(job_id):
-        raise HTTPException(status_code=404, detail="no such job")
-    return {"requeued": True}
+    new_id = store().requeue(job_id)
+    if new_id is None:
+        raise HTTPException(status_code=404, detail="no such job, or it is already queued")
+    return {"requeued": True, "job": new_id}
 
 
 @app.get("/glossaries", dependencies=[Depends(auth)])
@@ -262,13 +310,67 @@ PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
  .bar i{{display:block;height:100%;background:#88c0d0}}
  .pill{{background:#22262d;padding:2px 8px;border-radius:10px;margin-right:6px}}
  .path{{color:#8fbcbb}} .err{{color:#bf616a;font-size:12px}}
+ button{{font:inherit;font-size:12px;background:#3b4252;color:#e5e9f0;border:1px solid #4c566a;
+        border-radius:4px;padding:3px 8px;cursor:pointer}}
+ button:hover{{background:#4c566a}} button:disabled{{opacity:.5;cursor:default}}
+ input{{font:inherit;font-size:13px;background:#1b1f26;color:#d8dee9;border:1px solid #3b4252;
+       border-radius:4px;padding:5px 8px;width:520px;max-width:60vw}}
+ .rushbar{{margin:0 0 18px;padding:12px;background:#1b1f26;border:1px solid #262a31;border-radius:6px}}
+ .hint{{color:#7b8494;font-size:12px;margin-top:6px}}
+ #msg{{margin-left:10px;font-size:12px}}
 </style></head><body>
 <h1>tarjem</h1>
 <div class="sub">{provider} &middot; {model} &middot; {target}/{register} &middot; bazarr {bazarr}</div>
 <div style="margin-bottom:16px">{pills}</div>
-<table><tr><th>#</th><th>title</th><th>status</th><th>progress</th><th>source</th><th>result</th></tr>
+
+<div class="rushbar">
+  <input id="path" placeholder="/media/tv/Show/Season 1/Episode.mkv"
+         value="" spellcheck="false">
+  <button onclick="rushPath()">Translate now on Claude</button>
+  <span id="msg"></span>
+  <div class="hint">Jumps the queue and runs on Claude in its own lane, so it does
+    not wait behind the local model.{keyhint}</div>
+</div>
+
+<table><tr><th>#</th><th>title</th><th>status</th><th>progress</th><th>source</th><th>result</th><th></th></tr>
 {rows}
-</table></body></html>"""
+</table>
+
+<script>
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
+const hdrs = TOKEN ? {{"x-api-token": TOKEN, "Content-Type": "application/json"}}
+                   : {{"Content-Type": "application/json"}};
+function say(t, ok) {{
+  const m = document.getElementById("msg");
+  m.textContent = t;
+  m.style.color = ok ? "#a3be8c" : "#bf616a";
+}}
+async function post(url, body) {{
+  const r = await fetch(url, {{method: "POST", headers: hdrs,
+                              body: body ? JSON.stringify(body) : null}});
+  const d = await r.json().catch(() => ({{}}));
+  if (!r.ok) throw new Error(d.detail || r.status);
+  return d;
+}}
+async function rushPath() {{
+  const v = document.getElementById("path").value.trim();
+  if (!v) return say("paste a path first", false);
+  say("queueing...", true);
+  try {{
+    const d = await post("/translate", {{video: v, provider: "anthropic", rush: true, force: true}});
+    say(d.queued ? `queued as job ${{d.job}}` : d.reason, d.queued);
+  }} catch (e) {{ say(String(e.message), false); }}
+}}
+async function rushJob(btn, id) {{
+  btn.disabled = true;
+  say("queueing...", true);
+  try {{
+    const d = await post(`/jobs/${{id}}/rush?provider=anthropic`);
+    say(`queued as job ${{d.job}} on Claude`, true);
+  }} catch (e) {{ btn.disabled = false; say(String(e.message), false); }}
+}}
+</script>
+</body></html>"""
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -290,15 +392,27 @@ def dashboard() -> str:
             result = f'<span class="err">{_esc(j.get("error", ""))}</span>'
         else:
             result = _esc(j.get("stage", ""))
+        # Rushing something already queued or running would only duplicate it.
+        action = ""
+        if j["status"] in ("failed", "done", "skipped"):
+            action = (f'<button onclick="rushJob(this,{j["id"]})" '
+                      f'title="re-run on Claude, ahead of the queue">Claude</button>')
+        badge = ' <span class="pill">rush</span>' if j.get("priority") else ""
+
         rows.append(
             f'<tr><td>{j["id"]}</td>'
-            f'<td>{_esc(j.get("title") or Path(j["video"]).name)}<br>'
+            f'<td>{_esc(j.get("title") or Path(j["video"]).name)}{badge}<br>'
             f'<span class="path">{_esc(Path(j["video"]).name)}</span></td>'
             f'<td class="{j["status"]}">{j["status"]}</td>'
             f'<td><span class="bar"><i style="width:{pct}%"></i></span> {pct}%</td>'
-            f'<td>{_esc(j.get("origin") or "")}</td>'
-            f'<td>{result}</td></tr>'
+            f'<td>{_esc(j.get("provider") or j.get("origin") or "")}</td>'
+            f'<td>{result}</td><td>{action}</td></tr>'
         )
+
+    keyhint = ("" if settings.anthropic_api_key else
+               " <b>ANTHROPIC_API_KEY is not set</b>, so this will fail until it is.")
+    if settings.api_token:
+        keyhint += " Open this page with ?token=... for the buttons to authenticate."
 
     return PAGE.format(
         provider=settings.provider,
@@ -307,7 +421,8 @@ def dashboard() -> str:
         register=settings.register,
         bazarr="ok" if state["bazarr"].ping() else "unreachable",
         pills=pills,
-        rows="\n".join(rows) or '<tr><td colspan="6">nothing yet</td></tr>',
+        keyhint=keyhint,
+        rows="\n".join(rows) or '<tr><td colspan="7">nothing yet</td></tr>',
     )
 
 

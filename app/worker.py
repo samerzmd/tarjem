@@ -7,12 +7,13 @@ import os
 import re
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from . import sources, srt
 from .bazarr import BazarrClient
 from .config import Settings
-from .providers import build_provider
+from .providers import ProviderError, build_provider
 from .store import DONE, FAILED, SKIPPED, Store
 from .translate import TitleGlossary, Translator
 
@@ -96,8 +97,21 @@ class Pipeline:
             log.warning("job %s: %d cues is very high for one file - expect this "
                         "to take proportionally longer", job_id, len(cues))
 
-        provider = build_provider(self.cfg)
-        translator = Translator(provider, self.cfg)
+        # A job may name its own provider - "translate this one on Claude now"
+        # while the library grinds through the local model.
+        cfg = self.cfg
+        if job.get("provider") and job["provider"] != self.cfg.provider:
+            cfg = replace(self.cfg, provider=job["provider"])
+            log.info("job %s: overriding provider to %s (%s)",
+                     job_id, cfg.provider, cfg.active_model)
+
+        try:
+            provider = build_provider(cfg)
+        except ProviderError as exc:
+            self.store.finish(job_id, FAILED, error=f"cannot use {cfg.provider}: {exc}")
+            return
+
+        translator = Translator(provider, cfg)
         title = job.get("title") or display_title(video)
         key = job.get("series_key") or series_key(video)
 
@@ -127,13 +141,13 @@ class Pipeline:
                 log.warning("job %s: %d of %d cues fell back to source text",
                             job_id, stats.untouched, stats.total)
 
-            if self.cfg.dry_run:
+            if cfg.dry_run:
                 self.store.finish(job_id, DONE, stage="dry run - nothing written",
                                   stats=stats.as_dict(), usage=provider.usage.as_dict())
                 return
 
             note(0.98, "writing")
-            out = self._write(video, translated, source)
+            out = self._write(video, translated, source, cfg)
             self.store.finish(job_id, DONE, output=str(out), progress=1.0, stage="done",
                               stats=stats.as_dict(), usage=provider.usage.as_dict())
             log.info("job %s: wrote %s (%s)", job_id, out.name, stats.as_dict())
@@ -162,8 +176,9 @@ class Pipeline:
             self.store.put_glossary(key, glossary.model_dump())
         return glossary
 
-    def _write(self, video: Path, cues: list[srt.Cue], source: sources.SubtitleSource) -> Path:
-        out = sources.output_path(video, self.cfg)
+    def _write(self, video: Path, cues: list[srt.Cue], source: sources.SubtitleSource,
+               cfg: Settings) -> Path:
+        out = sources.output_path(video, cfg)
 
         tmp = out.with_suffix(out.suffix + ".tmp")
         tmp.write_text(srt.dumps(cues), encoding="utf-8")
@@ -176,7 +191,7 @@ class Pipeline:
             pass
         tmp.replace(out)
 
-        if self.cfg.tag_output:
+        if cfg.tag_output:
             # Provenance lives beside the subtitle rather than inside it: an SRT
             # has no comment syntax, and a marker cue would render on screen.
             meta = out.with_suffix(out.suffix + ".tarjem.json")
@@ -184,9 +199,9 @@ class Pipeline:
                 meta.write_text(json.dumps({
                     "translated_from": source.lang or "unknown",
                     "source": f"{source.origin}: {source.detail}",
-                    "provider": self.cfg.provider,
-                    "model": self.cfg.active_model,
-                    "register": self.cfg.register,
+                    "provider": cfg.provider,
+                    "model": cfg.active_model,
+                    "register": cfg.register,
                     "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 }, indent=2), encoding="utf-8")
             except OSError as exc:
@@ -212,20 +227,24 @@ class Pipeline:
 class Worker(threading.Thread):
     """Drains the job queue one video at a time."""
 
-    def __init__(self, cfg: Settings, store: Store, bazarr: BazarrClient, name: str = "worker"):
+    def __init__(self, cfg: Settings, store: Store, bazarr: BazarrClient,
+                 name: str = "worker", priority_only: bool = False):
         super().__init__(name=name, daemon=True)
         self.cfg = cfg
         self.store = store
         self.pipeline = Pipeline(cfg, store, bazarr)
+        # The rush lane takes only priority jobs. They run on a different
+        # provider, so they must not queue behind a local job with hours left.
+        self.priority_only = priority_only
         self._stop = threading.Event()
 
     def stop(self) -> None:
         self._stop.set()
 
     def run(self) -> None:
-        log.info("%s started", self.name)
+        log.info("%s started%s", self.name, " (rush lane)" if self.priority_only else "")
         while not self._stop.is_set():
-            job = self.store.claim_next()
+            job = self.store.claim_next(priority_only=self.priority_only)
             if not job:
                 self._stop.wait(3)
                 continue

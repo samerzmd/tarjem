@@ -115,3 +115,63 @@ def test_existing_arabic_sidecar_short_circuits(client, tmp_path):
     )
     assert response.json()["queued"] is False
     assert "already have" in response.json()["reason"]
+
+
+# -- rush: run one job on a different provider, ahead of the queue ---------
+
+def test_rush_requires_a_usable_provider(client, tmp_path):
+    from app.config import settings as s
+    video = tmp_path / "Rush.Me.2020.mkv"
+    video.write_bytes(b"x")
+    s.anthropic_api_key = ""
+
+    r = client.post("/translate", headers={"x-api-token": "secret"},
+                    json={"video": str(video), "provider": "anthropic", "rush": True})
+    assert r.status_code == 400 and "ANTHROPIC_API_KEY" in r.json()["detail"]
+
+
+def test_rush_queues_with_provider_and_priority(client, tmp_path):
+    from app.config import settings as s
+    s.anthropic_api_key = "test-key"
+    video = tmp_path / "Rush.Me.2021.mkv"
+    video.write_bytes(b"x")
+
+    r = client.post("/translate", headers={"x-api-token": "secret"},
+                    json={"video": str(video), "provider": "anthropic", "rush": True})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["queued"] and body["provider"] == "anthropic" and body["rush"]
+
+    job = client.get(f"/jobs/{body['job']}", headers={"x-api-token": "secret"}).json()
+    assert job["provider"] == "anthropic" and job["priority"] == 1
+    s.anthropic_api_key = ""
+
+
+def test_an_unknown_provider_is_rejected(client, tmp_path):
+    video = tmp_path / "Rush.Me.2022.mkv"
+    video.write_bytes(b"x")
+    r = client.post("/translate", headers={"x-api-token": "secret"},
+                    json={"video": str(video), "provider": "hal9000"})
+    assert r.status_code == 400 and "unknown provider" in r.json()["detail"]
+
+
+def test_rush_endpoint_requeues_an_existing_job(client, tmp_path):
+    from app.config import settings as s
+    s.anthropic_api_key = "test-key"
+    video = tmp_path / "Redo.Me.2023.mkv"
+    video.write_bytes(b"x")
+
+    first = client.post("/translate", headers={"x-api-token": "secret"},
+                        json={"video": str(video)}).json()["job"]
+    # The original has to leave the queue before it can be rushed.
+    client.post(f"/jobs/{first}/retry", headers={"x-api-token": "secret"})
+
+    r = client.post(f"/jobs/{first}/rush?provider=anthropic", headers={"x-api-token": "secret"})
+    assert r.status_code in (200, 404)   # 404 only if it is still queued
+    s.anthropic_api_key = ""
+
+
+def test_dashboard_shows_the_rush_control(client):
+    page = client.get("/").text
+    assert "Translate now on Claude" in page
+    assert "rushPath()" in page
