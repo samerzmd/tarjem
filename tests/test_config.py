@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.config import _bool, _int, _list, _str  # noqa: E402
+from app.config import Settings, _bool, _int, _list, _str  # noqa: E402
 
 
 @pytest.fixture
@@ -69,3 +69,15 @@ def test_list_falls_back_when_blank(env, value):
 def test_list_splits_and_trims(env):
     env(" en , fr ,, es ")
     assert _list("TARJEM_T", "en") == ["en", "fr", "es"]
+
+
+# -- LLM_EXTRA_BODY: raw JSON merged into the request, so bad input must not
+#    take the service down at startup.
+
+def test_extra_body_parses_json():
+    assert Settings(llm_extra_body='{"think": false}').extra_body == {"think": False}
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "not json", "[1,2]", '"a string"', "null"])
+def test_extra_body_ignores_anything_that_is_not_a_json_object(raw):
+    assert Settings(llm_extra_body=raw).extra_body == {}

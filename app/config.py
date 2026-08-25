@@ -1,6 +1,8 @@
 """Environment-driven settings. Everything has a working default except the API key."""
 from __future__ import annotations
 
+import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -74,6 +76,11 @@ class Settings:
     openai_api_key: str = _str("OPENAI_API_KEY")
     openai_base_url: str = _str("OPENAI_BASE_URL", "https://api.openai.com/v1")
     openai_model: str = _str("OPENAI_MODEL", "gpt-4.1")
+    # Self-hosted models can take minutes per batch on CPU.
+    llm_timeout: int = _int("LLM_TIMEOUT", 1800)
+    # Raw JSON merged into the request body - for server-specific switches such
+    # as Ollama's {"think": false} or a fixed {"temperature": 0.2}.
+    llm_extra_body: str = _str("LLM_EXTRA_BODY")
 
     # --- where the media lives ------------------------------------------
     media_roots: list[str] = field(default_factory=lambda: _list("MEDIA_ROOTS", "/media/movies,/media/tv"))
@@ -103,6 +110,19 @@ class Settings:
     @property
     def register_desc(self) -> str:
         return REGISTERS.get(self.register.lower(), REGISTERS["msa"])
+
+    @property
+    def extra_body(self) -> dict:
+        if not self.llm_extra_body:
+            return {}
+        try:
+            parsed = json.loads(self.llm_extra_body)
+        except json.JSONDecodeError:
+            logging.getLogger(__name__).warning(
+                "LLM_EXTRA_BODY is not valid JSON, ignoring: %s", self.llm_extra_body
+            )
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
 
     def to_local(self, path: str) -> str:
         """Map a path as Bazarr sees it onto this container's filesystem."""

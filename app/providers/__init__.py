@@ -9,11 +9,15 @@ def build_provider(cfg: Settings) -> Provider:
         from .anthropic_provider import AnthropicProvider
 
         return AnthropicProvider(api_key=cfg.anthropic_api_key, model=cfg.model, effort=cfg.effort)
-    if cfg.provider in ("openai", "openai-compatible"):
+    if cfg.provider in ("openai", "openai-compatible", "ollama", "local"):
         from .openai_provider import OpenAIProvider
 
         return OpenAIProvider(
-            api_key=cfg.openai_api_key, base_url=cfg.openai_base_url, model=cfg.openai_model
+            api_key=cfg.openai_api_key,
+            base_url=cfg.openai_base_url,
+            model=cfg.openai_model,
+            timeout=float(cfg.llm_timeout),
+            extra_body=cfg.extra_body,
         )
     raise ProviderError(f"unknown LLM_PROVIDER: {cfg.provider}", retryable=False)
 

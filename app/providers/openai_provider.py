@@ -1,13 +1,23 @@
 """OpenAI-compatible backend.
 
-Kept deliberately generic so the same code reaches OpenAI, a local Ollama or an
-LM Studio server via ``OPENAI_BASE_URL``. There is no prompt caching to manage
-here - the system prefix is simply resent each call.
+Kept deliberately generic so the same code reaches OpenAI, Ollama, vLLM, LM
+Studio or llama.cpp via ``OPENAI_BASE_URL``. "OpenAI-compatible" is a spectrum
+rather than a spec, so the provider negotiates down on first contact instead of
+assuming a dialect:
+
+* ``response_format: json_schema`` -> ``json_object`` -> nothing, depending on
+  what the server accepts.
+* ``max_tokens`` <-> ``max_completion_tokens``.
+
+Both results are remembered on the instance, so the negotiation costs at most
+one extra request per run. There is no prompt caching to manage here - the
+system prefix is simply resent each call.
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 
 import httpx
 
@@ -15,20 +25,32 @@ from .base import Provider, ProviderError, SystemBlock, Usage, T
 
 log = logging.getLogger(__name__)
 
+THINK_RE = re.compile(r"<(think|thinking|reasoning)>.*?</\1>", re.DOTALL | re.IGNORECASE)
+FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+
 
 class OpenAIProvider(Provider):
     name = "openai"
 
-    def __init__(self, api_key: str, base_url: str, model: str, timeout: float = 300.0):
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        timeout: float = 1800.0,
+        extra_body: dict | None = None,
+    ):
         super().__init__()
-        if not api_key:
-            raise ProviderError("OPENAI_API_KEY is not set", retryable=False)
         self.model = model
+        self.extra_body = extra_body or {}
+        # Local servers ignore the key but some reject a missing header outright.
         self.client = httpx.Client(
             base_url=base_url.rstrip("/"),
-            headers={"Authorization": f"Bearer {api_key}"},
+            headers={"Authorization": f"Bearer {api_key or 'no-key'}"},
             timeout=timeout,
         )
+        self._json_mode = "json_schema"      # -> "json_object" -> "none"
+        self._token_param = "max_tokens"     # -> "max_completion_tokens"
 
     def structured(
         self,
@@ -38,33 +60,64 @@ class OpenAIProvider(Provider):
         max_tokens: int = 16000,
     ) -> T:
         schema = _strict_schema(schema_model)
-        payload = {
-            "model": self.model,
-            "max_completion_tokens": max_tokens,
-            "messages": [
-                {"role": "system", "content": "\n\n".join(b.text for b in system)},
-                {"role": "user", "content": user},
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": schema_model.__name__, "strict": True, "schema": schema},
-            },
-        }
+        messages = [
+            {"role": "system", "content": "\n\n".join(b.text for b in system)},
+            {"role": "user", "content": user},
+        ]
 
-        try:
-            response = self.client.post("/chat/completions", json=payload)
-        except httpx.RequestError as exc:
-            raise ProviderError(f"connection error: {exc}", retryable=True) from exc
+        # Up to three attempts, each one dropping a capability the server rejected.
+        for _ in range(3):
+            payload = {"model": self.model, "messages": messages, **self.extra_body}
+            payload[self._token_param] = max_tokens
+            if self._json_mode == "json_schema":
+                payload["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema_model.__name__, "strict": True, "schema": schema,
+                    },
+                }
+            elif self._json_mode == "json_object":
+                payload["response_format"] = {"type": "json_object"}
 
-        if response.status_code >= 400:
-            retryable = response.status_code == 429 or response.status_code >= 500
-            retry_after = _retry_after(response)
+            try:
+                response = self.client.post("/chat/completions", json=payload)
+            except httpx.RequestError as exc:
+                raise ProviderError(f"connection error: {exc}", retryable=True) from exc
+
+            if response.status_code < 400:
+                return self._parse(response, schema_model)
+
+            detail = response.text[:400]
+            if response.status_code in (400, 404, 422) and self._degrade(detail):
+                continue
+
             raise ProviderError(
-                f"api error {response.status_code}: {response.text[:300]}",
-                retryable=retryable,
-                retry_after=retry_after,
+                f"api error {response.status_code}: {detail}",
+                retryable=response.status_code == 429 or response.status_code >= 500,
+                retry_after=_retry_after(response),
             )
 
+        raise ProviderError("server rejected every request shape we know", retryable=False)
+
+    def _degrade(self, detail: str) -> bool:
+        """Drop one unsupported feature. Returns False when there's nothing left."""
+        low = detail.lower()
+        if "max_completion_tokens" in low and self._token_param == "max_tokens":
+            log.info("server wants max_completion_tokens; switching")
+            self._token_param = "max_completion_tokens"
+            return True
+        if self._json_mode == "json_schema" and ("response_format" in low or "schema" in low
+                                                 or "json_schema" in low):
+            log.warning("server rejected json_schema; falling back to json_object")
+            self._json_mode = "json_object"
+            return True
+        if self._json_mode == "json_object":
+            log.warning("server rejected json_object; relying on prompt instructions alone")
+            self._json_mode = "none"
+            return True
+        return False
+
+    def _parse(self, response: httpx.Response, schema_model: type[T]) -> T:
         body = response.json()
         usage = body.get("usage") or {}
         self.usage.add(
@@ -78,17 +131,40 @@ class OpenAIProvider(Provider):
         choice = (body.get("choices") or [{}])[0]
         if choice.get("finish_reason") == "length":
             raise ProviderError("hit token limit - batch too large", retryable=True)
-        content = (choice.get("message") or {}).get("content")
-        if not content:
+
+        content = (choice.get("message") or {}).get("content") or ""
+        text = _json_payload(content)
+        if not text:
             raise ProviderError("empty response", retryable=True)
 
         try:
-            return schema_model.model_validate(json.loads(content))
+            return schema_model.model_validate(json.loads(text))
         except (json.JSONDecodeError, ValueError) as exc:
-            raise ProviderError(f"unparseable structured output: {exc}", retryable=True) from exc
+            raise ProviderError(
+                f"unparseable structured output: {exc} | {text[:200]}", retryable=True
+            ) from exc
 
     def close(self) -> None:
         self.client.close()
+
+
+def _json_payload(content: str) -> str:
+    """Dig the JSON object out of whatever a local model wrapped it in.
+
+    Reasoning models leak <think> blocks, chat-tuned models add ```json fences
+    and a sentence of preamble. None of that survives json.loads, and none of it
+    is worth failing a batch over.
+    """
+    text = THINK_RE.sub("", content).strip()
+    fenced = FENCE_RE.search(text)
+    if fenced:
+        text = fenced.group(1).strip()
+    if text.startswith("{"):
+        return text
+    start, end = text.find("{"), text.rfind("}")
+    if 0 <= start < end:
+        return text[start:end + 1]
+    return text
 
 
 def _strict_schema(model_cls) -> dict:

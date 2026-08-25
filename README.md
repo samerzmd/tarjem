@@ -181,23 +181,50 @@ In order, first hit wins:
 
 ---
 
-## Cost
+## Choosing a model: cost against wall-clock
 
-Each job reports its real token usage — `GET /jobs/{id}` shows `usage`, including
-how much was served from cache. Use that rather than an estimate.
+Every job records its real token usage — `GET /jobs/{id}` returns `usage`,
+including how much was served from cache. Trust that over any estimate here.
 
-As a rough order of magnitude on a ~1,200-cue film: low single-digit dollars on
-`claude-opus-5`, noticeably less on `claude-sonnet-5`, and a 22-minute episode
-runs perhaps a third of a film. Two settings move this the most:
+**Claude.** Roughly a dollar or so per feature film on `claude-opus-5` and
+noticeably less on `claude-sonnet-5`, with a 22-minute episode around a third of
+a film. A film takes a few minutes. `LLM_EFFORT=low` is the default because
+translation isn't a reasoning task, and the rules plus glossary sit in a cached
+prompt prefix, so most per-batch input bills at the cache-read rate.
 
-- `LLM_MODEL=claude-sonnet-5` — meaningfully cheaper per file. Opus is the better
-  translator, especially for idiom and register; Sonnet is a reasonable trade for
-  a large backfill.
-- `LLM_EFFORT=low` (the default) — translation isn't a reasoning task, and higher
-  effort mostly buys thinking tokens you're paying for and not using.
+**Self-hosted.** Free, and much slower than people expect. The arithmetic that
+matters is tokens per second, and it is worth measuring before committing:
 
-The glossary and the translation rules sit in a cached prompt prefix, so most of
-the per-batch input on a given file is billed at the cache-read rate.
+```bash
+curl -s http://YOUR-OLLAMA:11434/api/generate -d '{"model":"qwen3:14b",
+  "prompt":"Translate to Arabic: I have been chasing this man for six years.",
+  "think":false,"stream":false,"options":{"num_predict":60}}' \
+| python -c "import json,sys; d=json.load(sys.stdin); print(d['eval_count']/(d['eval_duration']/1e9), 'tok/s')"
+```
+
+Then: a 40-cue batch is roughly 2,500 prompt tokens and 1,200 output tokens, and
+a file is `cues / BATCH_SIZE` batches. At **1.8 tok/s** — a 14B Q4 model on CPU,
+which is what `size_vram: 0` in `/api/ps` means — that lands near **15 minutes
+per batch**, so about **2.5 hours per episode** and **8 hours per film**. On a
+GPU the same model runs 20–40x faster and the whole calculation changes.
+
+Check `/api/ps` before assuming you have GPU inference:
+
+```bash
+curl -s http://YOUR-OLLAMA:11434/api/ps | python -m json.tool
+```
+
+`size_vram: 0` means the weights are in system RAM and inference is CPU-bound.
+
+Quality is the other axis, and it is model-specific rather than size-specific.
+Arabic is badly served by many otherwise-good open models — Llama 3.x in
+particular is weak at it, while Qwen3 is genuinely multilingual. Translate one
+file with `--limit 60` on each candidate and read the output side by side before
+choosing. That is cheap, and it is the only test that counts.
+
+A reasonable middle path is to run the local model for the slow backfill and
+Claude for new downloads as they arrive, by flipping `LLM_PROVIDER` once the
+backlog is clear.
 
 ---
 
