@@ -1,0 +1,41 @@
+services:
+  tarjem:
+    build: .
+    image: tarjem:latest
+    container_name: tarjem
+    restart: unless-stopped
+    # Match the PUID/PGID the rest of the stack uses so the sidecars it writes
+    # are owned the same way as everything else in /mnt/storage/media.
+    user: "1000:1000"
+    ports:
+      - "8081:8080"
+    environment:
+      TZ: Asia/Riyadh
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      LLM_MODEL: ${LLM_MODEL:-claude-opus-5}
+      ARABIC_REGISTER: ${ARABIC_REGISTER:-msa}
+      BAZARR_URL: http://bazarr:6767
+      BAZARR_API_KEY: ${BAZARR_API_KEY}
+      MEDIA_ROOTS: /media/movies,/media/tv
+      SWEEP_ENABLED: ${SWEEP_ENABLED:-true}
+      SWEEP_INTERVAL_MIN: ${SWEEP_INTERVAL_MIN:-360}
+      SWEEP_LIMIT: ${SWEEP_LIMIT:-50}
+      API_TOKEN: ${TARJEM_TOKEN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      # Identical mount points to bazarr, so the paths in its webhook resolve
+      # here without any PATH_MAP translation.
+      - /mnt/storage/media/Movies:/media/movies
+      - /mnt/storage/media/TV Shows:/media/tv
+      - /mnt/storage/media:/media
+      - ./tarjem_data:/data
+    networks:
+      - media_network
+
+networks:
+  media_network:
+    # The stack in ../media-server owns this network. `docker compose up` there
+    # first, or change this to `driver: bridge` to run tarjem on its own.
+    external: true
+    name: media-server_media_network
