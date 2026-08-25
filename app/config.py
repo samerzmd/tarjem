@@ -117,12 +117,37 @@ class Settings:
     sweep_source: str = _str("SWEEP_SOURCE", "bazarr")  # bazarr | disk
     sweep_limit: int = _int("SWEEP_LIMIT", 50)
     dry_run: bool = _bool("DRY_RUN", False)
-    api_token: str = _str("API_TOKEN")
     log_level: str = _str("LOG_LEVEL", "INFO").upper()
+
+    # --- auth ------------------------------------------------------------
+    # Password for the dashboard login form. API_TOKEN is the machine
+    # credential - Bazarr's webhook sends it as a header and cannot log in.
+    auth_password: str = _str("AUTH_PASSWORD")
+    api_token: str = _str("API_TOKEN")
+    # Explicit signing key. Left empty, it is derived from the password, so
+    # changing the password signs every existing session out.
+    auth_secret: str = _str("AUTH_SECRET")
+    session_hours: int = _int("SESSION_HOURS", 720)   # 30 days
+    # Set when the service is reached over HTTPS, so the cookie is not sent
+    # in the clear. Harmless to leave off on a LAN-only deployment.
+    cookie_secure: bool = _bool("COOKIE_SECURE", False)
 
     @property
     def register_desc(self) -> str:
         return REGISTERS.get(self.register.lower(), REGISTERS["msa"])
+
+    @property
+    def password(self) -> str:
+        """What the login form checks against.
+
+        AUTH_PASSWORD if set; otherwise API_TOKEN, so an existing deployment
+        that only set a token gets a working login rather than a locked door.
+        """
+        return self.auth_password or self.api_token
+
+    @property
+    def auth_enabled(self) -> bool:
+        return bool(self.password or self.api_token)
 
     @property
     def active_model(self) -> str:

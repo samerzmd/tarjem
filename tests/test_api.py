@@ -29,21 +29,61 @@ def client():
         yield c
 
 
-def test_health(client):
+def test_health_says_little_to_a_stranger(client):
+    """Reachable for the container healthcheck, but it volunteers nothing."""
     body = client.get("/health").json()
+    assert body == {"status": "ok"}
+
+
+def test_health_is_detailed_once_authenticated(client):
+    body = client.get("/health", headers={"x-api-token": "secret"}).json()
     assert body["status"] == "ok"
     assert body["target_lang"] == "ar"
+    assert body["auth"] is True
 
 
-def test_dashboard_renders(client):
-    response = client.get("/")
+def test_dashboard_redirects_a_stranger_to_the_login_page(client):
+    response = client.get("/", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_dashboard_renders_when_authenticated(client):
+    response = client.get("/?token=secret")
     assert response.status_code == 200
     assert "tarjem" in response.text
 
 
-def test_endpoints_require_the_token(client):
+def test_endpoints_require_credentials(client):
     assert client.get("/jobs").status_code == 401
     assert client.get("/jobs", headers={"x-api-token": "secret"}).status_code == 200
+    assert client.get("/jobs?token=secret").status_code == 200
+
+
+def test_signing_in_sets_a_session_cookie_that_works(client):
+    from app.config import settings as s
+    s.auth_password = "hunter2"
+
+    bad = client.post("/login", data={"password": "wrong"}, follow_redirects=False)
+    assert bad.status_code == 303 and "error" in bad.headers["location"]
+
+    ok = client.post("/login", data={"password": "hunter2"}, follow_redirects=False)
+    assert ok.status_code == 303 and ok.headers["location"] == "/"
+    cookie = ok.cookies.get("tarjem_session")
+    assert cookie
+
+    # the cookie alone now authenticates, with no token in the URL
+    assert client.get("/jobs").status_code == 200
+    assert client.get("/", follow_redirects=False).status_code == 200
+
+    client.post("/logout", follow_redirects=False)
+    assert client.get("/jobs").status_code == 401
+    s.auth_password = ""
+
+
+def test_the_login_page_is_reachable_without_credentials(client):
+    page = client.get("/login")
+    assert page.status_code == 200 and "Sign in" in page.text
 
 
 def test_hook_ignores_arabic_downloads(client):
@@ -172,6 +212,6 @@ def test_rush_endpoint_requeues_an_existing_job(client, tmp_path):
 
 
 def test_dashboard_shows_the_rush_control(client):
-    page = client.get("/").text
+    page = client.get("/?token=secret").text
     assert "Translate now on Claude" in page
     assert "rushPath()" in page

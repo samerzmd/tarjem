@@ -6,10 +6,12 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, Response
+from fastapi.responses import (HTMLResponse, JSONResponse, PlainTextResponse,
+                               RedirectResponse)
 from pydantic import BaseModel
 
+from . import auth as auth_mod
 from . import sources
 from .bazarr import BazarrClient
 from .config import settings
@@ -45,6 +47,7 @@ async def lifespan(app: FastAPI):
     state.update(store=store, bazarr=bazarr, workers=workers, sweeper=sweeper, started=time.time())
     log.info("tarjem up | provider=%s model=%s target=%s register=%s",
              settings.provider, settings.active_model, settings.target_lang, settings.register)
+    auth_mod.warn_if_open(settings)
     if not bazarr.ping():
         log.warning("Bazarr not reachable at %s - webhook still works, sweeping will not",
                     settings.bazarr_url)
@@ -60,9 +63,64 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="tarjem", description="AI Arabic subtitles for the *arr stack", lifespan=lifespan)
 
 
-def auth(x_api_token: str = Header(default=""), token: str = Query(default="")) -> None:
-    if settings.api_token and settings.api_token not in (x_api_token, token):
-        raise HTTPException(status_code=401, detail="bad or missing token")
+auth = auth_mod.make_dependency(settings)
+
+
+LOGIN_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>tarjem</title><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ body{{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:#14161a;
+      color:#d8dee9;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}}
+ form{{background:#1b1f26;border:1px solid #262a31;border-radius:8px;padding:28px;width:300px}}
+ h1{{font-size:18px;margin:0 0 4px}} p{{color:#7b8494;font-size:12px;margin:0 0 18px}}
+ input{{font:inherit;width:100%;box-sizing:border-box;background:#14161a;color:#d8dee9;
+       border:1px solid #3b4252;border-radius:4px;padding:8px}}
+ button{{font:inherit;width:100%;margin-top:12px;background:#5e81ac;color:#eceff4;border:0;
+        border-radius:4px;padding:9px;cursor:pointer}}
+ button:hover{{background:#81a1c1}}
+ .err{{color:#bf616a;font-size:12px;margin-top:12px}}
+</style></head><body>
+<form method="post" action="/login">
+  <h1>tarjem</h1>
+  <p>AI Arabic subtitles</p>
+  <input type="password" name="password" placeholder="password" autofocus
+         autocomplete="current-password">
+  <button type="submit">Sign in</button>
+  {error}
+</form></body></html>"""
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_form(error: str = Query(default="")) -> str:
+    return LOGIN_PAGE.format(
+        error='<div class="err">Wrong password.</div>' if error else ""
+    )
+
+
+@app.post("/login")
+def login(password: str = Form(default="")) -> Response:
+    if not auth_mod.password_ok(settings, password):
+        log.warning("failed sign-in attempt")
+        return RedirectResponse("/login?error=1", status_code=303)
+
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(
+        auth_mod.COOKIE,
+        auth_mod.issue(settings),
+        max_age=settings.session_hours * 3600,
+        httponly=True,          # not readable from JavaScript
+        samesite="lax",         # not sent on cross-site form posts
+        secure=settings.cookie_secure,
+        path="/",
+    )
+    return response
+
+
+@app.post("/logout")
+def logout() -> Response:
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(auth_mod.COOKIE, path="/")
+    return response
 
 
 def store() -> Store:
@@ -112,8 +170,11 @@ def _check_provider(name: str | None) -> str:
 # --------------------------------------------------------------------------
 
 @app.get("/health")
-def health() -> dict:
-    db = store()
+def health(request: Request) -> dict:
+    """Deliberately reachable without credentials - the container healthcheck
+    and any uptime monitor need it - but it only says "ok" to a stranger."""
+    if not auth_mod.authenticated(settings, request):
+        return {"status": "ok"}
     return {
         "status": "ok",
         "uptime_s": round(time.time() - state["started"]),
@@ -122,8 +183,9 @@ def health() -> dict:
         "target_lang": settings.target_lang,
         "register": settings.register,
         "bazarr": state["bazarr"].ping(),
-        "jobs": db.counts(),
+        "jobs": store().counts(),
         "dry_run": settings.dry_run,
+        "auth": settings.auth_enabled,
     }
 
 
@@ -319,7 +381,7 @@ PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
  .hint{{color:#7b8494;font-size:12px;margin-top:6px}}
  #msg{{margin-left:10px;font-size:12px}}
 </style></head><body>
-<h1>tarjem</h1>
+<h1>tarjem {logout}</h1>
 <div class="sub">{provider} &middot; {model} &middot; {target}/{register} &middot; bazarr {bazarr}</div>
 <div style="margin-bottom:16px">{pills}</div>
 
@@ -374,7 +436,11 @@ async function rushJob(btn, id) {{
 
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard() -> str:
+def dashboard(request: Request):
+    # A browser gets the sign-in page rather than a bare 401.
+    if not auth_mod.authenticated(settings, request):
+        return RedirectResponse("/login", status_code=303)
+
     db = store()
     counts = db.counts()
     pills = "".join(
@@ -422,6 +488,9 @@ def dashboard() -> str:
         bazarr="ok" if state["bazarr"].ping() else "unreachable",
         pills=pills,
         keyhint=keyhint,
+        logout=('<form method="post" action="/logout" style="display:inline">'
+                '<button style="font-size:11px">sign out</button></form>'
+                if settings.auth_enabled else ''),
         rows="\n".join(rows) or '<tr><td colspan="7">nothing yet</td></tr>',
     )
 

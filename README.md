@@ -265,9 +265,28 @@ backlog is clear.
 
 ---
 
+## Auth
+
+Two credentials, because there are two kinds of caller:
+
+- **`AUTH_PASSWORD`** — the dashboard sign-in. A signed, HttpOnly session cookie
+  keeps you logged in; changing the password signs every session out.
+- **`API_TOKEN`** — for machines. Bazarr's webhook sends it as `x-api-token`
+  and cannot fill in a login form.
+
+Either one alone enables auth, and an install that only ever set `API_TOKEN`
+can sign in with it. **Set a password.** The dashboard can queue jobs against a
+paid API, so an open port is a bill waiting to happen — tarjem logs a warning at
+startup if neither is configured.
+
+`/health` stays reachable without credentials for the container healthcheck, but
+answers a stranger with `{"status": "ok"}` and nothing else. Set
+`COOKIE_SECURE=true` if you put tarjem behind HTTPS.
+
 ## API
 
-Everything takes `x-api-token` as a header, or `?token=` in the query string.
+Endpoints take `x-api-token` as a header, `?token=` in the query string, or a
+session cookie from the sign-in page.
 
 | Method | Path | |
 |---|---|---|
