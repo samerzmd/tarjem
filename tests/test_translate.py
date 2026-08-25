@@ -139,3 +139,40 @@ def test_context_window_carries_previous_translations(cfg):
     Translator(provider, cfg).translate(make_srt(15), "Test")
     # The stub records the user prompt indirectly; check the second batch saw context.
     assert provider.calls == 3
+
+
+# -- Arabic grammar guardrails --------------------------------------------
+
+def test_arabic_guardrails_are_in_the_system_prompt(cfg):
+    from app.translate import _system_blocks
+    cfg.target_lang = "ar"
+    cfg.grammar_guardrails = True
+    text = _system_blocks(cfg, None)[0].text
+    assert "ARABIC MECHANICS" in text
+    # The specific failures observed from a small local model.
+    assert "ثلاثة أيام" in text          # reverse number agreement
+    assert "أيها القائد" in text          # vocative without the article
+    assert "فات الأوان" in text           # idioms are not calqued
+
+
+def test_guardrails_can_be_turned_off(cfg):
+    from app.translate import _system_blocks
+    cfg.target_lang = "ar"
+    cfg.grammar_guardrails = False
+    assert "ARABIC MECHANICS" not in _system_blocks(cfg, None)[0].text
+
+
+def test_guardrails_do_not_apply_to_other_target_languages(cfg):
+    from app.translate import _system_blocks
+    cfg.target_lang = "fr"
+    cfg.grammar_guardrails = True
+    assert "ARABIC MECHANICS" not in _system_blocks(cfg, None)[0].text
+
+
+def test_guardrails_ride_along_with_the_cached_prefix(cfg):
+    """They belong in the cached block, not re-sent per batch."""
+    from app.translate import _system_blocks
+    cfg.target_lang = "ar"
+    cfg.grammar_guardrails = True
+    blocks = _system_blocks(cfg, None)
+    assert blocks[0].cache is True

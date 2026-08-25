@@ -71,6 +71,10 @@ class Settings:
     max_retries: int = _int("MAX_RETRIES", 3)
     glossary_enabled: bool = _bool("GLOSSARY_ENABLED", True)
     glossary_sample: int = _int("GLOSSARY_SAMPLE", 180)
+    # Explicit Arabic grammar rules in the system prompt. Small local models
+    # need them; a frontier model mostly knows this already, but they are
+    # cheap - prompt tokens process far faster than they generate.
+    grammar_guardrails: bool = _bool("GRAMMAR_GUARDRAILS", True)
 
     anthropic_api_key: str = _str("ANTHROPIC_API_KEY")
     openai_api_key: str = _str("OPENAI_API_KEY")

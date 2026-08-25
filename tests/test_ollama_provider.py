@@ -118,3 +118,33 @@ def test_empty_and_unparseable_responses_are_retryable():
     with pytest.raises(ProviderError) as exc:
         call(provider(lambda r: httpx.Response(200, json=reply("not json at all"))))
     assert exc.value.retryable
+
+
+def test_think_is_dropped_for_a_model_that_does_not_support_it():
+    """Only reasoning models accept `think`; Ollama 400s on the rest."""
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append("think" in body)
+        if "think" in body:
+            return httpx.Response(400, text='{"error":"model does not support think"}')
+        return httpx.Response(200, json=reply(json.dumps(CUES)))
+
+    p = provider(handler)
+    assert len(call(p).cues) == 2
+    assert seen == [True, False]
+
+    # The downgrade sticks, so later batches don't pay for the probe.
+    call(p)
+    assert seen[-1] is False
+
+
+def test_a_non_think_error_is_not_swallowed_by_the_retry():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text='{"error":"invalid format schema"}')
+
+    with pytest.raises(ProviderError) as exc:
+        call(provider(handler))
+    assert "invalid format schema" in str(exc.value)
+    assert not exc.value.retryable

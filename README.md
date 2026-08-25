@@ -226,10 +226,30 @@ curl -s http://YOUR-OLLAMA:11434/api/ps | python -m json.tool
 `size_vram: 0` means the weights are in system RAM and inference is CPU-bound.
 
 Quality is the other axis, and it is model-specific rather than size-specific.
-Arabic is badly served by many otherwise-good open models — Llama 3.x in
-particular is weak at it, while Qwen3 is genuinely multilingual. Translate one
-file with `--limit 60` on each candidate and read the output side by side before
-choosing. That is cheap, and it is the only test that counts.
+A bigger general model is often worse at Arabic than a smaller specialised one,
+and it is slower too — so reach for a specialist before reaching for parameters:
+
+| Model | Size | Note |
+|---|---|---|
+| `command-r7b-arabic` | 7B | Cohere, built for Arabic. Small enough to be quick |
+| `emr/silma-9b-instruct` | 9B | SILMA.AI, Arabic-focused |
+| `iKhalid/ALLaM` | 7B | Saudi NCAI, trained for Arabic |
+| `qwen3:14b` | 14B | Genuinely multilingual, but a generalist |
+| `llama3.1:8b` | 8B | Weak Arabic — avoid for this |
+
+Mixture-of-experts models (`qwen3:30b-a3b`, `glm-4.7-flash`) activate a fraction
+of their weights per token, so they can be *faster* on CPU than a dense model
+half their size — worth trying if you have the RAM to load one.
+
+What a small model typically gets wrong in Arabic is grammar rather than
+vocabulary: reverse number agreement (`ثلاثة أيام`, not `ثلاث أيام`),
+demonstrative gender (`ذلك الشتاء`), the vocative (`أيها القائد`, not
+`يا القائد`), and calqued idioms. `GRAMMAR_GUARDRAILS=true` (the default) spells
+these out in the system prompt with examples. It costs a few hundred prompt
+tokens, which are processed several times faster than they are generated.
+
+Translate one file with `--limit 60` on each candidate and read the output side
+by side before choosing. That is cheap, and it is the only test that counts.
 
 A reasonable middle path is to run the local model for the slow backfill and
 Claude for new downloads as they arrive, by flipping `LLM_PROVIDER` once the

@@ -112,6 +112,43 @@ you did not find in the source, no explanations, no alternatives.
 bare numbers, and codes. Return them unchanged rather than inventing a translation.
 """
 
+# Smaller models get the structure right and then fumble the grammar. These are
+# the mistakes they actually make, so they are worth naming with examples rather
+# than trusting the model to remember its own rules. Prompt tokens are processed
+# several times faster than they are generated, so this is cheap insurance.
+ARABIC_MECHANICS = """\
+ARABIC MECHANICS - check every line against these before you emit it:
+
+* NUMBER AGREEMENT REVERSES for 3-10. A masculine plural noun takes the
+  feminine numeral and vice versa: ثلاثة أيام (not ثلاث أيام), ثلاث سنوات
+  (not ثلاثة سنوات), خمسة رجال, خمس نساء.
+
+* DEMONSTRATIVES AGREE WITH THE NOUN'S GENDER, not with English intuition.
+  الشتاء and الصيف are masculine: ذلك الشتاء, not تلك الشتاء.
+
+* VOCATIVE. A definite noun takes أيها / أيتها, never يا with the article:
+  أيها القائد (not يا القائد), أيتها الطبيبة. يا is for names and indefinites:
+  يا أحمد, يا رجل.
+
+* NO DOUBLED NEGATION OR TENSE. لم already carries the past: لم تعد (not
+  لم تعد تعود). Pick one construction and finish it.
+
+* IDIOMS ARE NEVER CALQUED. Translate what the line means, then find the
+  Arabic that a speaker would actually use:
+    "that ship has sailed"      -> فات الأوان
+    "get down!" (take cover)    -> انبطح! / انخفض!
+    "hang in there"             -> اصمد
+    "it's on me"                -> على حسابي
+  A word-for-word rendering of an idiom is a mistranslation even when every
+  individual word is right.
+
+* PHYSICAL COMMANDS DESCRIBE THE ACTUAL ACTION. "Get down" is not اذهب.
+  "Hold on" is not أمسك unless someone is gripping something.
+
+* VERB CHOICE CARRIES INTENT. "Chasing someone" is يطارد / يلاحق - pursuit.
+  It is not يراقب, which is surveillance.
+"""
+
 GLOSSARY_PROMPT = """\
 Below is a representative sample of cues drawn from across one subtitle file\
 {title_line}.
@@ -147,6 +184,8 @@ def _system_blocks(cfg: Settings, glossary: TitleGlossary | None) -> list[System
     rules = RULES.format(
         register=cfg.register_desc, max_line=cfg.max_line_chars, max_lines=cfg.max_lines
     )
+    if cfg.target_lang == "ar" and cfg.grammar_guardrails:
+        rules = f"{rules}\n{ARABIC_MECHANICS}"
     blocks = [SystemBlock(rules)]
     if glossary:
         blocks.append(SystemBlock(render_glossary(glossary), cache=True))

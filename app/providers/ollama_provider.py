@@ -39,11 +39,16 @@ class OllamaProvider(Provider):
     ):
         super().__init__()
         self.model = model
-        self.options = {"temperature": 0.3, "num_ctx": num_ctx, **(options or {})}
+        # Translation wants fidelity, not invention. Low temperature measurably
+        # reduces the paraphrasing that small models drift into.
+        self.options = {"temperature": 0.2, "num_ctx": num_ctx, **(options or {})}
         # /v1 belongs to the OpenAI-compatible provider; strip it if it was passed.
         self.client = httpx.Client(
             base_url=base_url.rstrip("/").removesuffix("/v1"), timeout=timeout
         )
+        # Only reasoning models accept `think`; Ollama rejects it on the rest.
+        # Assume it is wanted and drop it the first time a server objects.
+        self._send_think = True
 
     def structured(
         self,
@@ -54,7 +59,6 @@ class OllamaProvider(Provider):
     ) -> T:
         payload = {
             "model": self.model,
-            "think": False,
             "stream": False,
             "format": schema_model.model_json_schema(),
             "options": {**self.options, "num_predict": max_tokens},
@@ -64,13 +68,26 @@ class OllamaProvider(Provider):
             ],
         }
 
-        try:
-            response = self.client.post("/api/chat", json=payload)
-        except httpx.RequestError as exc:
-            raise ProviderError(f"connection error: {exc}", retryable=True) from exc
+        for _ in range(2):
+            if self._send_think:
+                payload["think"] = False
+            else:
+                payload.pop("think", None)
 
-        if response.status_code >= 400:
+            try:
+                response = self.client.post("/api/chat", json=payload)
+            except httpx.RequestError as exc:
+                raise ProviderError(f"connection error: {exc}", retryable=True) from exc
+
+            if response.status_code < 400:
+                break
+
             detail = response.text[:400]
+            if self._send_think and "think" in detail.lower():
+                log.info("%s does not take `think`; dropping it", self.model)
+                self._send_think = False
+                continue
+
             raise ProviderError(
                 f"ollama error {response.status_code}: {detail}",
                 # A missing model or a bad schema will never succeed on retry.
