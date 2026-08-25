@@ -307,30 +307,35 @@ LIBRARY_TTL = 300
 
 
 def _library(refresh: bool = False) -> tuple[list[dict], str]:
-    """Everything still missing Arabic, cached briefly.
+    """The whole library, each item marked with what tarjem knows about it.
 
-    Asking Bazarr means an API round-trip per 50 items and the disk fallback
-    walks the whole library, so a page refresh should not redo it.
+    Walking MEDIA_ROOTS and asking Bazarr both cost real time, so a page
+    refresh should not redo them.
     """
     cached = state.get("library")
     if cached and not refresh and time.time() - cached["at"] < LIBRARY_TTL:
         return cached["items"], cached["source"]
 
-    candidates, source = state["sweeper"].candidates()
+    videos, wanted = state["sweeper"].everything()
     db = store()
     items = []
-    for cand in candidates:
+    for cand in videos:
         video = cand["video"]
         path = str(video)
+        existing = sources.has_target(video, settings)
         items.append({
             "video": path,
             "title": cand["title"],
             "series": cand["key"],
             "name": video.name,
-            "translated": sources.has_target(video, settings) is not None,
+            "translated": existing is not None,
+            "subtitle": existing.name if existing else "",
             "pending": db.is_pending(path),
+            # Bazarr still wants the target language for this one.
+            "wanted": path in wanted,
         })
     items.sort(key=lambda i: (i["series"].lower(), i["name"].lower()))
+    source = "disk + bazarr" if wanted else "disk"
     state["library"] = {"items": items, "source": source, "at": time.time()}
     return items, source
 
@@ -338,15 +343,28 @@ def _library(refresh: bool = False) -> tuple[list[dict], str]:
 @app.get("/api/library", dependencies=[Depends(auth)])
 def api_library(
     q: str = Query(default=""),
-    limit: int = Query(default=500, ge=1, le=5000),
+    state_filter: str = Query(default="all", alias="state"),
+    limit: int = Query(default=5000, ge=1, le=20000),
     refresh: bool = Query(default=False),
 ) -> dict:
     items, source = _library(refresh)
+    total_all = len(items)
+
     if q:
         needle = q.casefold()
         items = [i for i in items if needle in i["title"].casefold()
                  or needle in i["name"].casefold()]
-    return {"source": source, "total": len(items), "items": items[:limit]}
+    if state_filter == "missing":
+        items = [i for i in items if not i["translated"]]
+    elif state_filter == "translated":
+        items = [i for i in items if i["translated"]]
+
+    return {
+        "source": source,
+        "library_total": total_all,
+        "total": len(items),
+        "items": items[:limit],
+    }
 
 
 @app.get("/jobs", dependencies=[Depends(auth)])
@@ -485,77 +503,103 @@ async function rushJob(btn, id) {{
 LIBRARY_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>tarjem library</title><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
- body{{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:#14161a;
-      color:#d8dee9;margin:0;padding:24px}}
- h1{{font-size:18px;margin:0 0 4px}} a{{color:#88c0d0}}
- .sub{{color:#7b8494;margin-bottom:18px}}
- table{{border-collapse:collapse;width:100%;font-size:13px}}
- th,td{{text-align:left;padding:6px 10px;border-bottom:1px solid #262a31}}
- th{{color:#7b8494;font-weight:500;position:sticky;top:0;background:#14161a}}
- .path{{color:#8fbcbb;font-size:12px}}
- .done{{color:#a3be8c}} .pending{{color:#ebcb8b}} .missing{{color:#7b8494}}
- button{{font:inherit;font-size:12px;background:#3b4252;color:#e5e9f0;border:1px solid #4c566a;
-        border-radius:4px;padding:3px 8px;cursor:pointer;margin-right:4px}}
- button:hover{{background:#4c566a}} button:disabled{{opacity:.45;cursor:default}}
- button.claude{{border-color:#5e81ac}}
- input{{font:inherit;font-size:13px;background:#1b1f26;color:#d8dee9;border:1px solid #3b4252;
-       border-radius:4px;padding:6px 9px;width:340px;max-width:55vw}}
- .bar{{margin-bottom:16px}} #msg{{margin-left:10px;font-size:12px}}
+ body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:#14161a;
+      color:#d8dee9;margin:0;padding:24px}
+ h1{font-size:18px;margin:0 0 4px} a{color:#88c0d0}
+ .sub{color:#7b8494;margin-bottom:18px}
+ table{border-collapse:collapse;width:100%;font-size:13px}
+ th,td{text-align:left;padding:6px 10px;border-bottom:1px solid #262a31}
+ th{color:#7b8494;font-weight:500;position:sticky;top:0;background:#14161a}
+ .path{color:#8fbcbb;font-size:12px}
+ .done{color:#a3be8c} .pending{color:#ebcb8b} .missing{color:#7b8494}
+ button{font:inherit;font-size:12px;background:#3b4252;color:#e5e9f0;border:1px solid #4c566a;
+        border-radius:4px;padding:3px 8px;cursor:pointer;margin-right:4px}
+ button:hover{background:#4c566a} button:disabled{opacity:.45;cursor:default}
+ button.claude{border-color:#5e81ac}
+ input{font:inherit;font-size:13px;background:#1b1f26;color:#d8dee9;border:1px solid #3b4252;
+       border-radius:4px;padding:6px 9px;width:340px;max-width:55vw}
+ .bar{margin-bottom:16px} #msg{margin-left:10px;font-size:12px}
+ .tab{background:#22262d;border-color:#22262d} .tab.on{background:#5e81ac;border-color:#5e81ac}
+ .warn{color:#ebcb8b}
 </style></head><body>
 <h1>library <a href="/" style="font-size:12px">&larr; jobs</a></h1>
-<div class="sub">{total} items missing {target}, via {source}{stale}</div>
+<div class="sub" id="counts">reading the library&hellip;</div>
 <div class="bar">
   <input id="q" placeholder="filter by title or filename" oninput="render()">
-  <button onclick="load(true)">refresh</button>
+  <button class="tab on" id="t-all" onclick="setFilter('all')">all</button>
+  <button class="tab" id="t-missing" onclick="setFilter('missing')">missing</button>
+  <button class="tab" id="t-translated" onclick="setFilter('translated')">translated</button>
+  <button onclick="load(true)">rescan</button>
   <span id="msg"></span>
 </div>
 <table><thead><tr><th>show / film</th><th>file</th><th>state</th><th></th></tr></thead>
 <tbody id="rows"></tbody></table>
 <script>
 const TOKEN = new URLSearchParams(location.search).get("token") || "";
-const hdrs = TOKEN ? {{"x-api-token": TOKEN, "Content-Type": "application/json"}}
-                   : {{"Content-Type": "application/json"}};
-let ITEMS = [];
-function say(t, ok) {{
+const hdrs = TOKEN ? {"x-api-token": TOKEN, "Content-Type": "application/json"}
+                   : {"Content-Type": "application/json"};
+let ITEMS = [], FILTER = "all", SOURCE = "";
+function say(t, ok) {
   const m = document.getElementById("msg");
   m.textContent = t; m.style.color = ok ? "#a3be8c" : "#bf616a";
-}}
-function esc(s) {{ return s.replace(/[&<>"]/g, c =>
-  ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}})[c]); }}
-async function load(refresh) {{
-  say(refresh ? "rescanning..." : "loading...", true);
-  const r = await fetch("/api/library?limit=2000" + (refresh ? "&refresh=true" : ""),
-                        {{headers: hdrs}});
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]); }
+function setFilter(f) {
+  FILTER = f;
+  for (const t of ["all", "missing", "translated"])
+    document.getElementById("t-" + t).classList.toggle("on", t === f);
+  render();
+}
+async function load(refresh) {
+  say(refresh ? "rescanning the library..." : "loading...", true);
+  const r = await fetch("/api/library" + (refresh ? "?refresh=true" : ""), {headers: hdrs});
   if (!r.ok) return say("not authorised - open this page with ?token=...", false);
   const d = await r.json();
-  ITEMS = d.items; say(`${{d.total}} items`, true); render();
-}}
-function render() {{
+  ITEMS = d.items; SOURCE = d.source;
+  say("", true); render();
+}
+function render() {
   const q = document.getElementById("q").value.trim().toLowerCase();
-  const rows = ITEMS.filter(i => !q || i.title.toLowerCase().includes(q)
-                                    || i.name.toLowerCase().includes(q));
-  document.getElementById("rows").innerHTML = rows.slice(0, 800).map(i => {{
-    const state = i.translated ? '<span class="done">translated</span>'
+  let rows = ITEMS.filter(i => !q || i.title.toLowerCase().includes(q)
+                                  || i.name.toLowerCase().includes(q));
+  if (FILTER === "missing") rows = rows.filter(i => !i.translated);
+  if (FILTER === "translated") rows = rows.filter(i => i.translated);
+
+  const done = ITEMS.filter(i => i.translated).length;
+  document.getElementById("counts").innerHTML =
+    `${ITEMS.length} videos &middot; ${done} translated &middot; ` +
+    `${ITEMS.length - done} without a subtitle &middot; via ${esc(SOURCE)}`;
+
+  document.getElementById("rows").innerHTML = rows.slice(0, 1500).map(i => {
+    const state = i.translated ? `<span class="done">${esc(i.subtitle)}</span>`
                 : i.pending    ? '<span class="pending">queued</span>'
-                :                '<span class="missing">missing</span>';
-    const dis = (i.translated || i.pending) ? "disabled" : "";
-    return `<tr><td>${{esc(i.title)}}</td>
-      <td class="path">${{esc(i.name)}}</td><td>${{state}}</td>
-      <td><button ${{dis}} onclick="go(this,'${{encodeURIComponent(i.video)}}',false)">local</button>
-      <button class="claude" ${{dis}}
-        onclick="go(this,'${{encodeURIComponent(i.video)}}',true)">Claude</button></td></tr>`;
-  }}).join("") || '<tr><td colspan="4">nothing matches</td></tr>';
-}}
-async function go(btn, video, claude) {{
+                :                '<span class="missing">none</span>';
+    // Already translated is not a reason to refuse - it is a reason to warn.
+    // force renames the existing file to .bak rather than deleting it.
+    const label = i.translated ? "redo" : "local";
+    const dis = i.pending ? "disabled" : "";
+    return `<tr><td>${esc(i.title)}</td>
+      <td class="path">${esc(i.name)}</td><td>${state}</td>
+      <td><button ${dis} onclick="go(this,'${encodeURIComponent(i.video)}',false,${!!i.translated})">${label}</button>
+      <button class="claude" ${dis}
+        onclick="go(this,'${encodeURIComponent(i.video)}',true,${!!i.translated})">Claude</button></td></tr>`;
+  }).join("") || '<tr><td colspan="4">nothing matches</td></tr>';
+}
+async function go(btn, video, claude, translated) {
+  const path = decodeURIComponent(video);
+  if (translated && !confirm(
+      "This already has a subtitle.\\n\\nRe-translate it? The existing file is " +
+      "renamed to .bak, not deleted.")) return;
   btn.disabled = true; say("queueing...", true);
-  const body = {{video: decodeURIComponent(video)}};
-  if (claude) {{ body.provider = "anthropic"; body.rush = true; }}
-  const r = await fetch("/translate", {{method: "POST", headers: hdrs,
-                                        body: JSON.stringify(body)}});
-  const d = await r.json().catch(() => ({{}}));
-  if (!r.ok) {{ btn.disabled = false; return say(d.detail || r.status, false); }}
-  say(d.queued ? `queued as job ${{d.job}}` : d.reason, d.queued);
-}}
+  const body = {video: path, force: !!translated};
+  if (claude) { body.provider = "anthropic"; body.rush = true; }
+  const r = await fetch("/translate", {method: "POST", headers: hdrs,
+                                        body: JSON.stringify(body)});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { btn.disabled = false; return say(d.detail || r.status, false); }
+  say(d.queued ? `queued as job ${d.job}` : d.reason, d.queued);
+}
 load(false);
 </script></body></html>"""
 
@@ -564,14 +608,7 @@ load(false);
 def library_page(request: Request):
     if not auth_mod.authenticated(settings, request):
         return RedirectResponse("/login", status_code=303)
-    cached = state.get("library")
-    age = int(time.time() - cached["at"]) if cached else 0
-    return LIBRARY_PAGE.format(
-        total=len(cached["items"]) if cached else "&hellip;",
-        target=settings.target_lang,
-        source=cached["source"] if cached else "&hellip;",
-        stale=f" &middot; cached {age}s ago" if cached else "",
-    )
+    return LIBRARY_PAGE
 
 
 @app.get("/", response_class=HTMLResponse)

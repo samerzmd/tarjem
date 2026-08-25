@@ -237,8 +237,8 @@ def test_library_api_lists_candidates(client, tmp_path, monkeypatch):
     video.write_bytes(b"x")
 
     monkeypatch.setattr(
-        m.state["sweeper"], "candidates",
-        lambda: ([{"video": video, "title": "Some Show - Ep01", "key": "Some Show"}], "disk"),
+        m.state["sweeper"], "everything",
+        lambda: ([{"video": video, "title": "Some Show - Ep01", "key": "Some Show"}], set()),
     )
     m.state.pop("library", None)
 
@@ -257,8 +257,8 @@ def test_library_marks_already_translated_items(client, tmp_path, monkeypatch):
     (video.parent / "Ep02.ar.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nx\n")
 
     monkeypatch.setattr(
-        m.state["sweeper"], "candidates",
-        lambda: ([{"video": video, "title": "Done Show", "key": "Done Show"}], "disk"),
+        m.state["sweeper"], "everything",
+        lambda: ([{"video": video, "title": "Done Show", "key": "Done Show"}], set()),
     )
     m.state.pop("library", None)
 
@@ -275,9 +275,57 @@ def test_library_filters_by_query(client, tmp_path, monkeypatch):
         v.write_bytes(b"x")
         made.append({"video": v, "title": name, "key": name})
 
-    monkeypatch.setattr(m.state["sweeper"], "candidates", lambda: (made, "disk"))
+    monkeypatch.setattr(m.state["sweeper"], "everything", lambda: (made, set()))
     m.state.pop("library", None)
 
     d = client.get("/api/library?q=alpha", headers={"x-api-token": "secret"}).json()
     assert d["total"] == 1 and d["items"][0]["title"] == "Alpha"
     m.state.pop("library", None)
+
+
+def test_library_includes_already_translated_items(client, tmp_path, monkeypatch):
+    """Everything is listed, not only what is missing - you may want a redo."""
+    from app import main as m
+    made = []
+    for name, done in (("Fresh", False), ("Already", True)):
+        v = tmp_path / name / "Season 1" / f"{name}.mkv"
+        v.parent.mkdir(parents=True)
+        v.write_bytes(b"x")
+        if done:
+            (v.parent / f"{name}.ar.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nx\n")
+        made.append({"video": v, "title": name, "key": name})
+
+    monkeypatch.setattr(m.state["sweeper"], "everything", lambda: (made, set()))
+    m.state.pop("library", None)
+
+    d = client.get("/api/library", headers={"x-api-token": "secret"}).json()
+    assert d["total"] == 2 and d["library_total"] == 2
+    done = [i for i in d["items"] if i["translated"]][0]
+    assert done["title"] == "Already" and done["subtitle"] == "Already.ar.srt"
+
+    only_missing = client.get("/api/library?state=missing",
+                              headers={"x-api-token": "secret"}).json()
+    assert only_missing["total"] == 1 and only_missing["items"][0]["title"] == "Fresh"
+
+    only_done = client.get("/api/library?state=translated",
+                           headers={"x-api-token": "secret"}).json()
+    assert only_done["total"] == 1 and only_done["items"][0]["title"] == "Already"
+    m.state.pop("library", None)
+
+
+def test_force_lets_a_translated_item_be_redone(client, tmp_path):
+    video = tmp_path / "Redo.2024.mkv"
+    video.write_bytes(b"x")
+    existing = tmp_path / "Redo.2024.ar.srt"
+    existing.write_text("1\n00:00:01,000 --> 00:00:02,000\nold\n")
+
+    blocked = client.post("/translate", headers={"x-api-token": "secret"},
+                          json={"video": str(video)})
+    assert blocked.json()["queued"] is False
+
+    forced = client.post("/translate", headers={"x-api-token": "secret"},
+                         json={"video": str(video), "force": True})
+    assert forced.json()["queued"] is True
+    # the old subtitle is kept, not destroyed
+    assert not existing.exists()
+    assert (tmp_path / "Redo.2024.ar.srt.bak").is_file()

@@ -300,6 +300,17 @@ class Sweeper(threading.Thread):
                 return found, "bazarr"
         return self._from_disk(), "disk"
 
+    def everything(self) -> tuple[list[dict], set[str]]:
+        """Every video under MEDIA_ROOTS, plus the set Bazarr still wants.
+
+        The sweep only cares about what is missing, but browsing wants the whole
+        library - including titles already translated, so they can be redone.
+        """
+        wanted = {
+            str(item["video"]) for item in self._from_bazarr()
+        } if self.cfg.sweep_source == "bazarr" else set()
+        return self._from_disk(), wanted
+
     def sweep(self, limit: int | None = None) -> dict:
         limit = limit or self.cfg.sweep_limit
         candidates, _ = self.candidates()
