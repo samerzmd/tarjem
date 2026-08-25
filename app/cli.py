@@ -73,12 +73,20 @@ def main(argv: list[str] | None = None) -> int:
     if not cues:
         print("no cues parsed - is that really a subtitle file?", file=sys.stderr)
         return 2
-    if args.limit:
-        cues = cues[:args.limit]
     print(f"{len(cues)} cues", file=sys.stderr)
 
     if args.analyze:
         return analyze(cues)
+
+    # Collapse before --limit, or on a stacked file the limit slices a handful
+    # of distinct lines repeated many times and tells you nothing.
+    if settings.collapse_duplicates:
+        cues, merged = srt.collapse_duplicates(cues)
+        if merged:
+            print(f"merged {merged} stacked duplicates, {len(cues)} cues remain", file=sys.stderr)
+    if args.limit:
+        cues = cues[:args.limit]
+        print(f"translating the first {len(cues)}", file=sys.stderr)
 
     provider = build_provider(settings)
     translator = Translator(provider, settings)

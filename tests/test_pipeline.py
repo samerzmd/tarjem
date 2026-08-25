@@ -197,3 +197,56 @@ def test_a_partial_failure_still_writes_what_it_got(rig, tmp_path, monkeypatch):
     assert job["status"] == DONE
     assert job["stats"]["untranslated"] == 2
     assert (video.parent / "The.Expanse.S02E03.1080p.ar.srt").is_file()
+
+
+def _stacked(lines: int = 6, copies: int = 3) -> str:
+    """`lines` distinct cues, each repeated `copies` times on top of itself."""
+    blocks, n = [], 0
+    for line in range(lines):
+        start, end = line * 2, line * 2 + 2
+        for copy in range(copies):
+            n += 1
+            blocks.append(
+                f"{n}\n00:00:{start:02d},{copy * 100:03d} --> "
+                f"00:00:{end:02d},000\nLine {line} of dialogue."
+            )
+    return "\n\n".join(blocks)
+
+
+STACKED = _stacked()
+
+
+def test_stacked_duplicates_are_merged_before_translating(rig, tmp_path):
+    """An .ass flattened to SRT repeats each line on top of itself. One real
+    episode: 5,390 cues, 346 unique lines, 958 after collapsing."""
+    cfg, store, _bazarr, provider, pipeline = rig
+    folder = tmp_path / "Show" / "Season 1"
+    folder.mkdir(parents=True)
+    video = folder / "Show.S01E01.mkv"
+    video.write_bytes(b"x")
+    (folder / "Show.S01E01.en.srt").write_text(STACKED, encoding="utf-8")
+
+    job_id = store.enqueue(str(video), "", "", "sweep")
+    pipeline.run(dict(store.claim_next()))
+
+    job = store.get(job_id)
+    assert job["status"] == DONE, job.get("error")
+    # 18 source cues, 6 distinct lines stacked 3 deep -> 6 written.
+    written = srt.parse((folder / "Show.S01E01.ar.srt").read_text(encoding="utf-8"))
+    assert len(written) == 6
+    assert job["stats"]["total_cues"] == 6
+
+
+def test_collapsing_can_be_turned_off(rig, tmp_path):
+    cfg, store, _bazarr, _provider, pipeline = rig
+    cfg.collapse_duplicates = False
+    folder = tmp_path / "Show" / "Season 1"
+    folder.mkdir(parents=True)
+    video = folder / "Show.S01E01.mkv"
+    video.write_bytes(b"x")
+    (folder / "Show.S01E01.en.srt").write_text(STACKED, encoding="utf-8")
+
+    store.enqueue(str(video), "", "", "sweep")
+    pipeline.run(dict(store.claim_next()))
+    written = srt.parse((folder / "Show.S01E01.ar.srt").read_text(encoding="utf-8"))
+    assert len(written) == 18

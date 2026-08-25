@@ -78,6 +78,15 @@ class Pipeline:
                               error=f"source has only {len(cues)} cues ({source.detail})")
             return
 
+        # Do this before translating, not after: an .ass flattened into SRT can
+        # be 90% cues that sit on top of each other, and carrying them through
+        # the whole pipeline only to drop them at the end wastes the bookkeeping.
+        if self.cfg.collapse_duplicates:
+            cues, merged = srt.collapse_duplicates(cues)
+            if merged:
+                log.info("job %s: merged %d stacked duplicate cues, %d remain",
+                         job_id, merged, len(cues))
+
         self.store.update(job_id, origin=source.origin, detail=source.detail, progress=0.05)
         log.info("job %s: %d cues from %s (%s)", job_id, len(cues), source.origin, source.detail)
         if len(cues) > 2000:
@@ -124,12 +133,6 @@ class Pipeline:
                 return
 
             note(0.98, "writing")
-            if self.cfg.collapse_duplicates:
-                translated, merged = srt.collapse_duplicates(translated)
-                if merged:
-                    log.info("job %s: merged %d stacked duplicate cues, writing %d",
-                             job_id, merged, len(translated))
-                    stats.collapsed = merged
             out = self._write(video, translated, source)
             self.store.finish(job_id, DONE, output=str(out), progress=1.0, stage="done",
                               stats=stats.as_dict(), usage=provider.usage.as_dict())
