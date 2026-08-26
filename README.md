@@ -22,6 +22,30 @@ pasting an SRT into a chat window can't:
 
 ---
 
+## What it looks like
+
+The web UI sits alongside Sonarr, Radarr and Bazarr and borrows their layout, so
+it reads as another service in the stack rather than a bolted-on script.
+
+**Activity** — what is translating right now, what finished, and which machine did
+it. Counts double as filters.
+
+![The activity page](docs/screenshots/activity.png)
+
+**Library** — everything on disk, grouped by series and sorted by season and
+episode. Tick episodes, or take a whole show's missing ones in a click, and send
+the selection to a local GPU or to Claude. Films get a tab of their own.
+
+![The library page](docs/screenshots/library.png)
+
+**Backends** — the machines doing the work, and how much each has done. Disable
+one to get its GPU back for the evening; a job already running on it finishes
+first.
+
+![The backends page](docs/screenshots/backends.png)
+
+---
+
 ## How it plugs into your stack
 
 ```
