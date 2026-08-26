@@ -374,7 +374,8 @@ def api_library(
 
 @app.get("/jobs", dependencies=[Depends(auth)])
 def jobs(limit: int = Query(default=50, ge=1, le=500), status: str | None = None) -> dict:
-    return {"jobs": store().recent(limit, status), "counts": store().counts()}
+    return {"jobs": store().recent(limit, status, running_first=True),
+            "counts": store().counts()}
 
 
 @app.get("/jobs/{job_id}", dependencies=[Depends(auth)])
@@ -440,7 +441,9 @@ PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
  .queued{{color:#81a1c1}} .skipped{{color:#6b7280}}
  .bar{{display:inline-block;height:6px;background:#2e3440;width:90px;border-radius:3px;overflow:hidden}}
  .bar i{{display:block;height:100%;background:#88c0d0}}
- .pill{{background:#22262d;padding:2px 8px;border-radius:10px;margin-right:6px}}
+ .pill{{background:#22262d;padding:2px 8px;border-radius:10px;margin-right:6px;
+        text-decoration:none;display:inline-block}}
+ a.pill:hover{{background:#3b4252}}
  .path{{color:#8fbcbb}} .err{{color:#bf616a;font-size:12px}}
  button{{font:inherit;font-size:12px;background:#3b4252;color:#e5e9f0;border:1px solid #4c566a;
         border-radius:4px;padding:3px 8px;cursor:pointer}}
@@ -617,19 +620,26 @@ def library_page(request: Request):
 
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard(request: Request):
+def dashboard(request: Request, status: str = ""):
     # A browser gets the sign-in page rather than a bare 401.
     if not auth_mod.authenticated(settings, request):
         return RedirectResponse("/login", status_code=303)
 
     db = store()
     counts = db.counts()
+    # Each count is a filter link - with a long queue the default view hides
+    # those rows, so there has to be a way back to them.
     pills = "".join(
-        f'<span class="pill {k}">{k}: {v}</span>' for k, v in sorted(counts.items())
+        f'<a class="pill {k}" href="/?status={k}">{k}: {v}</a>'
+        for k, v in sorted(counts.items())
     ) or '<span class="pill">no jobs yet</span>'
 
     rows = []
-    for j in db.recent(40, running_first=True):
+    # Default view hides the queue: with a real backlog it is dozens of
+    # identical rows, and it buries both the running job and the history.
+    rows_source = (db.recent(60, status=status, running_first=True) if status
+                   else db.recent(40, running_first=True, exclude=("queued",)))
+    for j in rows_source:
         pct = int((j.get("progress") or 0) * 100)
         stats = j.get("stats") or {}
         if j["status"] == "done" and stats:
@@ -667,7 +677,10 @@ def dashboard(request: Request):
         target=settings.target_lang,
         register=settings.register,
         bazarr="ok" if state["bazarr"].ping() else "unreachable",
-        pills=pills,
+        pills=pills + (
+            ' <a class="pill" href="/">show all activity</a>' if status
+            else ' <span class="pill" style="background:none;color:#7b8494">'
+                 'queued rows hidden - click a count to filter</span>'),
         keyhint=keyhint,
         logout=('<form method="post" action="/logout" style="display:inline">'
                 '<button style="font-size:11px">sign out</button></form>'

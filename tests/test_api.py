@@ -329,3 +329,37 @@ def test_force_lets_a_translated_item_be_redone(client, tmp_path):
     # the old subtitle is kept, not destroyed
     assert not existing.exists()
     assert (tmp_path / "Redo.2024.ar.srt.bak").is_file()
+
+
+# -- dashboard with a real backlog ----------------------------------------
+# 57 queued jobs pushed the running one and all the history out of the window.
+
+def test_dashboard_hides_the_queue_but_keeps_the_running_job(client, tmp_path):
+    from app import main as m
+    from pathlib import Path as P
+    db = m.state["store"]
+    # Earlier tests left jobs queued, so claim until nothing is left, then take
+    # the one we care about - claim_next serves the oldest first.
+    while db.claim_next():
+        pass
+    db.enqueue(str(tmp_path / "the-running-one.mkv"))
+    claimed = db.claim_next()
+    assert P(claimed["video"]).name == "the-running-one.mkv"
+    for n in range(45):
+        db.enqueue(str(tmp_path / f"queued{n}.mkv"))
+
+    page = client.get("/?token=secret").text
+    assert "the-running-one.mkv" in page
+    assert "queued0.mkv" not in page          # the queue is not rendered
+    assert 'href="/?status=queued"' in page   # but it is one click away
+
+
+def test_dashboard_can_filter_to_a_single_status(client):
+    page = client.get("/?token=secret&status=queued").text
+    assert "queued0.mkv" in page
+    assert "show all activity" in page
+
+
+def test_jobs_api_puts_the_running_job_first(client):
+    d = client.get("/jobs?limit=50", headers={"x-api-token": "secret"}).json()
+    assert d["jobs"][0]["status"] == "running"

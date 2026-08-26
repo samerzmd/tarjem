@@ -176,12 +176,18 @@ class Store:
         return _row(row) if row else None
 
     def recent(self, limit: int = 50, status: str | None = None,
-               running_first: bool = False) -> list[dict]:
+               running_first: bool = False, exclude: tuple[str, ...] = ()) -> list[dict]:
         query = "SELECT * FROM jobs"
         params: tuple = ()
         if status:
             query += " WHERE status=?"
             params = (status,)
+        elif exclude:
+            # A long queue drowns everything else: 57 identical "queued" rows
+            # push the running job and all the history out of any sane window.
+            placeholders = ",".join("?" * len(exclude))
+            query += f" WHERE status NOT IN ({placeholders})"
+            params = exclude
         if running_first:
             # Newest-first buries the job actually doing work under every item
             # the sweeper has queued since - which reads as "nothing is
