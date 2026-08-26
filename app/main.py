@@ -424,7 +424,18 @@ class BackendRequest(BaseModel):
 
 @app.get("/api/backends", dependencies=[Depends(auth)])
 def api_backends() -> dict:
-    return {"backends": pool().status()}
+    work = store().work_by_backend()
+    rows = []
+    for backend in pool().status():
+        rows.append(backend | work.get(backend["name"], {"done": 0, "failed": 0, "cues": 0}))
+    # Anything that did work but is no longer configured still deserves a line,
+    # otherwise removing a backend quietly erases its history from the page.
+    for name, counts in work.items():
+        if not any(r["name"] == name for r in rows):
+            rows.append({"name": name, "kind": "", "url": "", "model": "",
+                         "enabled": False, "busy": False, "healthy": True,
+                         "failures": 0, "down_for_s": 0, "retired": True} | counts)
+    return {"backends": rows}
 
 
 @app.post("/api/backends", dependencies=[Depends(auth)])
@@ -556,7 +567,8 @@ def dashboard(request: Request, status: str = ""):
             action = (f"<button onclick=\"rushJob(this,{j['id']},'ollama')\">local</button>"
                       f"<button onclick=\"rushJob(this,{j['id']},'anthropic')\">Claude</button>")
         badge = " <span class='pill'>rush</span>" if j.get("priority") else ""
-        where = _esc(j.get("provider") or j.get("origin") or "")
+        # Which machine did the work - "healthy" only says a backend answers.
+        where = _esc(j.get("backend") or j.get("provider") or j.get("origin") or "")
 
         rows.append(
             f"<tr><td class='sub'>{j['id']}</td>"
@@ -597,7 +609,7 @@ def dashboard(request: Request, status: str = ""):
   <h2>Activity</h2>
   <table>
     <thead><tr><th>#</th><th>Title</th><th>Status</th><th>Progress</th>
-      <th>Where</th><th>Result</th><th></th></tr></thead>
+      <th>Backend</th><th>Result</th><th></th></tr></thead>
     <tbody>{"".join(rows) or "<tr><td colspan='7' class='empty'>Nothing yet</td></tr>"}</tbody>
   </table>
 </div>"""
@@ -725,8 +737,9 @@ def backends_page(request: Request):
 <div class='panel'>
   <h2>Backends</h2>
   <table>
-    <thead><tr><th>Backend</th><th>Model</th><th>State</th><th></th></tr></thead>
-    <tbody id='rows'><tr><td colspan='4' class='empty'>Loading&hellip;</td></tr></tbody>
+    <thead><tr><th>Backend</th><th>Model</th><th>State</th><th>Work done</th>
+      <th></th></tr></thead>
+    <tbody id='rows'><tr><td colspan='5' class='empty'>Loading&hellip;</td></tr></tbody>
   </table>
 </div>
 
@@ -752,6 +765,7 @@ def backends_page(request: Request):
 
     script = ui.JS_BASE + """
 function render(list) {
+  const TOTAL = list.reduce((n, b) => n + (b.cues || 0), 0);
   document.getElementById("rows").innerHTML = list.map(function (b) {
     let state = b.enabled ? "<span class='pill enabled'>enabled</span>"
                           : "<span class='pill skipped'>disabled</span>";

@@ -108,3 +108,28 @@ def test_the_running_job_is_listed_first(tmp_path):
 
     assert store.recent(10)[0]["id"] != running                 # newest-first
     assert store.recent(10, running_first=True)[0]["id"] == running
+
+
+def test_work_by_backend_shows_who_actually_did_the_translating(tmp_path):
+    """'healthy' only says a backend answers. This says whether it pulled its
+    weight, which is the question once a second machine is added."""
+    store = Store(tmp_path / "share.db")
+
+    for backend, cues, status in (("gpu-a", 300, "done"), ("gpu-a", 200, "done"),
+                                  ("gpu-b", 100, "done"), ("gpu-b", 0, "failed")):
+        job = store.enqueue(f"/m/{backend}-{cues}-{status}.mkv")
+        store.claim_next()
+        store.update(job, backend=backend)
+        store.finish(job, status, stats={"total_cues": cues})
+
+    work = store.work_by_backend()
+    assert work["gpu-a"] == {"done": 2, "failed": 0, "cues": 500}
+    assert work["gpu-b"] == {"done": 1, "failed": 1, "cues": 100}
+
+
+def test_a_job_with_no_backend_recorded_is_left_out(tmp_path):
+    store = Store(tmp_path / "nb.db")
+    job = store.enqueue("/m/x.mkv")
+    store.claim_next()
+    store.finish(job, "done", stats={"total_cues": 50})
+    assert store.work_by_backend() == {}

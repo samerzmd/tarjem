@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     bz_item_id   INTEGER DEFAULT 0,
     provider     TEXT DEFAULT '',
     priority     INTEGER DEFAULT 0,
+    backend      TEXT DEFAULT '',
     created_at   REAL NOT NULL,
     started_at   REAL,
     finished_at  REAL
@@ -106,6 +107,7 @@ class Store:
             ("bz_item_id", "INTEGER DEFAULT 0"),
             ("provider", "TEXT DEFAULT ''"),
             ("priority", "INTEGER DEFAULT 0"),
+            ("backend", "TEXT DEFAULT ''"),
         ):
             if name not in have:
                 self._db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {ddl}")
@@ -244,6 +246,26 @@ class Store:
             row["bz_kind"], row["bz_series_id"], row["bz_item_id"],
             provider, priority,
         )
+
+    def work_by_backend(self) -> dict[str, dict]:
+        """How much each machine has actually done.
+
+        "healthy" only says a backend answers. This says whether it is pulling
+        its weight, which is the question when a second GPU is added.
+        """
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT backend, status, COUNT(*) n, "
+                "       SUM(COALESCE(json_extract(stats,'$.total_cues'),0)) cues "
+                "FROM jobs WHERE backend != '' GROUP BY backend, status"
+            ).fetchall()
+        out: dict[str, dict] = {}
+        for r in rows:
+            entry = out.setdefault(r["backend"], {"done": 0, "failed": 0, "cues": 0})
+            if r["status"] in ("done", "failed"):
+                entry[r["status"]] += r["n"]
+            entry["cues"] += int(r["cues"] or 0)
+        return out
 
     # -- backends ---------------------------------------------------------
     # Managed from the UI, so they have to outlive a restart. LLM_ENDPOINTS

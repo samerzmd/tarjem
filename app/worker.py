@@ -121,7 +121,11 @@ class Pipeline:
             if endpoint is None:
                 self.store.update(job_id, status="queued", stage="waiting for a free backend")
                 return
-            self.store.update(job_id, stage=f"on {endpoint.name}")
+            self.store.update(job_id, stage=f"on {endpoint.name}",
+                              backend=endpoint.name)
+        elif not job.get("backend"):
+            # No pool: record the provider so the column is never blank.
+            self.store.update(job_id, backend=cfg.provider)
 
         try:
             provider = build_provider(cfg, endpoint)
