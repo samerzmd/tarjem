@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from . import auth as auth_mod
 from . import sources
+from . import ui
 from .bazarr import BazarrClient
 from .config import settings
 from .endpoints import Pool, parse as parse_endpoints
@@ -81,35 +82,11 @@ app = FastAPI(title="tarjem", description="AI Arabic subtitles for the *arr stac
 auth = auth_mod.make_dependency(settings)
 
 
-LOGIN_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<title>tarjem</title><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
- body{{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:#14161a;
-      color:#d8dee9;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}}
- form{{background:#1b1f26;border:1px solid #262a31;border-radius:8px;padding:28px;width:300px}}
- h1{{font-size:18px;margin:0 0 4px}} p{{color:#7b8494;font-size:12px;margin:0 0 18px}}
- input{{font:inherit;width:100%;box-sizing:border-box;background:#14161a;color:#d8dee9;
-       border:1px solid #3b4252;border-radius:4px;padding:8px}}
- button{{font:inherit;width:100%;margin-top:12px;background:#5e81ac;color:#eceff4;border:0;
-        border-radius:4px;padding:9px;cursor:pointer}}
- button:hover{{background:#81a1c1}}
- .err{{color:#bf616a;font-size:12px;margin-top:12px}}
-</style></head><body>
-<form method="post" action="/login">
-  <h1>tarjem</h1>
-  <p>AI Arabic subtitles</p>
-  <input type="password" name="password" placeholder="password" autofocus
-         autocomplete="current-password">
-  <button type="submit">Sign in</button>
-  {error}
-</form></body></html>"""
-
-
 @app.get("/login", response_class=HTMLResponse)
 def login_form(error: str = Query(default="")) -> str:
-    return LOGIN_PAGE.format(
-        error='<div class="err">Wrong password.</div>' if error else ""
-    )
+    return ui.LOGIN.replace(
+        "__ERROR__", "<div class='err' style='margin-top:12px;font-size:12px'>"
+                     "Wrong password.</div>" if error else "")
 
 
 @app.post("/login")
@@ -533,133 +510,147 @@ def subtitle(job_id: int) -> str:
 # Status page
 # --------------------------------------------------------------------------
 
-PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<title>tarjem</title><meta http-equiv="refresh" content="10">
-<style>
- body{{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:#14161a;color:#d8dee9;
-      margin:0;padding:24px}}
- h1{{font-size:18px;margin:0 0 4px}} .sub{{color:#7b8494;margin-bottom:20px}}
- table{{border-collapse:collapse;width:100%;font-size:13px}}
- th,td{{text-align:left;padding:6px 10px;border-bottom:1px solid #262a31;vertical-align:top}}
- th{{color:#7b8494;font-weight:500}}
- .done{{color:#a3be8c}} .failed{{color:#bf616a}} .running{{color:#ebcb8b}}
- .queued{{color:#81a1c1}} .skipped{{color:#6b7280}}
- .bar{{display:inline-block;height:6px;background:#2e3440;width:90px;border-radius:3px;overflow:hidden}}
- .bar i{{display:block;height:100%;background:#88c0d0}}
- .pill{{background:#22262d;padding:2px 8px;border-radius:10px;margin-right:6px;
-        text-decoration:none;display:inline-block}}
- a.pill:hover{{background:#3b4252}}
- .path{{color:#8fbcbb}} .err{{color:#bf616a;font-size:12px}}
- button{{font:inherit;font-size:12px;background:#3b4252;color:#e5e9f0;border:1px solid #4c566a;
-        border-radius:4px;padding:3px 8px;cursor:pointer}}
- button:hover{{background:#4c566a}} button:disabled{{opacity:.5;cursor:default}}
- input{{font:inherit;font-size:13px;background:#1b1f26;color:#d8dee9;border:1px solid #3b4252;
-       border-radius:4px;padding:5px 8px;width:520px;max-width:60vw}}
- .rushbar{{margin:0 0 18px;padding:12px;background:#1b1f26;border:1px solid #262a31;border-radius:6px}}
- .hint{{color:#7b8494;font-size:12px;margin-top:6px}}
- #msg{{margin-left:10px;font-size:12px}}
-</style></head><body>
-<h1>tarjem <a href="/library" style="font-size:12px">library</a> <a href="/backends" style="font-size:12px">backends</a> {logout}</h1>
-<div class="sub">{provider} &middot; {model} &middot; {target}/{register} &middot; bazarr {bazarr}</div>
-<div style="margin-bottom:16px">{pills}</div>
+def _footer() -> str:
+    """The rail's small print: what is doing the work right now."""
+    backends = pool().status() if pool() else []
+    if backends:
+        live = sum(1 for b in backends if b["enabled"] and b["healthy"])
+        detail = f"{live}/{len(backends)} backends up"
+    else:
+        detail = f"{settings.provider} &middot; {settings.active_model}"
+    return (f"{detail}<br>{settings.target_lang} &middot; {settings.register}"
+            f"<br>bazarr {'ok' if state['bazarr'].ping() else 'unreachable'}")
 
-<div class="rushbar">
-  <input id="path" placeholder="/media/tv/Show/Season 1/Episode.mkv"
-         value="" spellcheck="false">
-  <button onclick="rushPath('ollama')">Translate now (local)</button>
-  <button onclick="rushPath('anthropic')">Translate now (Claude)</button>
-  <span id="msg"></span>
-  <div class="hint">Either one jumps the queue and runs in its own lane rather
-    than waiting behind the backlog.{keyhint}</div>
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard(request: Request, status: str = ""):
+    if not auth_mod.authenticated(settings, request):
+        return RedirectResponse("/login", status_code=303)
+
+    db = store()
+    counts = db.counts()
+    pills = "".join(
+        f"<a class='pill {k}' href='/?status={k}'>{k} {v}</a>"
+        for k, v in sorted(counts.items())
+    ) or "<span class='pill'>no jobs yet</span>"
+
+    # The default view leaves the queue out: with a real backlog it is dozens
+    # of identical rows that bury both the running job and the history.
+    rows_source = (db.recent(60, status=status, running_first=True) if status
+                   else db.recent(40, running_first=True, exclude=("queued",)))
+
+    rows = []
+    for j in rows_source:
+        pct = int((j.get("progress") or 0) * 100)
+        stats = j.get("stats") or {}
+        if j["status"] == "done" and stats:
+            result = (f"{stats.get('translated', 0)}/{stats.get('total_cues', 0)} cues"
+                      f" &middot; {stats.get('seconds', 0)}s")
+        elif j["status"] == "failed":
+            result = f"<span class='err'>{_esc(j.get('error', ''))}</span>"
+        else:
+            result = _esc(j.get("stage", ""))
+
+        action = ""
+        if j["status"] in ("failed", "done", "skipped"):
+            action = (f"<button onclick=\"rushJob(this,{j['id']},'ollama')\">local</button>"
+                      f"<button onclick=\"rushJob(this,{j['id']},'anthropic')\">Claude</button>")
+        badge = " <span class='pill'>rush</span>" if j.get("priority") else ""
+        where = _esc(j.get("provider") or j.get("origin") or "")
+
+        rows.append(
+            f"<tr><td class='sub'>{j['id']}</td>"
+            f"<td>{_esc(j.get('title') or Path(j['video']).name)}{badge}"
+            f"<br><span class='sub'>{_esc(Path(j['video']).name)}</span></td>"
+            f"<td><span class='pill {j['status']}'>{j['status']}</span></td>"
+            f"<td><span class='bar'><i style='width:{pct}%'></i></span>"
+            f"<span class='sub'>{pct}%</span></td>"
+            f"<td class='sub'>{where}</td><td>{result}</td>"
+            f"<td style='white-space:nowrap'>{action}</td></tr>"
+        )
+
+    keyhint = ("" if settings.anthropic_api_key else
+               " <span class='warn'>ANTHROPIC_API_KEY is not set.</span>")
+    if settings.api_token:
+        keyhint += " <span class='sub'>Open with ?token=… for the buttons to work.</span>"
+
+    body = f"""
+<div class='toolbar'>{pills}
+  {"<a class='pill' href='/'>show all activity</a>" if status
+   else "<span class='sub'>queued rows hidden &middot; click a count to filter</span>"}
 </div>
 
-<table><tr><th>#</th><th>title</th><th>status</th><th>progress</th><th>source</th><th>result</th><th></th></tr>
-{rows}
-</table>
+<div class='panel'>
+  <h2>Translate now</h2>
+  <div class='inner'>
+    <input id='path' style='width:min(560px,60vw)' spellcheck='false'
+           placeholder='/media/tv/Show/Season 1/Episode.mkv'>
+    <button class='primary' onclick="rushPath('ollama')">Local</button>
+    <button onclick="rushPath('anthropic')">Claude</button>
+    <span id='msg' class='msg'></span>
+    <div class='sub' style='margin-top:9px'>Jumps the queue and runs in its own
+      lane.{keyhint}</div>
+  </div>
+</div>
 
-<script>
-const TOKEN = new URLSearchParams(location.search).get("token") || "";
-const hdrs = TOKEN ? {{"x-api-token": TOKEN, "Content-Type": "application/json"}}
-                   : {{"Content-Type": "application/json"}};
-function say(t, ok) {{
-  const m = document.getElementById("msg");
-  m.textContent = t;
-  m.style.color = ok ? "#a3be8c" : "#bf616a";
-}}
-async function post(url, body) {{
-  const r = await fetch(url, {{method: "POST", headers: hdrs,
-                              body: body ? JSON.stringify(body) : null}});
-  const d = await r.json().catch(() => ({{}}));
-  if (!r.ok) throw new Error(d.detail || r.status);
-  return d;
-}}
-async function rushPath(provider) {{
+<div class='panel'>
+  <h2>Activity</h2>
+  <table>
+    <thead><tr><th>#</th><th>Title</th><th>Status</th><th>Progress</th>
+      <th>Where</th><th>Result</th><th></th></tr></thead>
+    <tbody>{"".join(rows) or "<tr><td colspan='7' class='empty'>Nothing yet</td></tr>"}</tbody>
+  </table>
+</div>"""
+
+    script = ui.JS_BASE + """
+async function rushPath(provider) {
   const v = document.getElementById("path").value.trim();
   if (!v) return say("paste a path first", false);
-  say("queueing...", true);
-  try {{
-    const d = await post("/translate",
-                         {{video: v, provider: provider, rush: true, force: true}});
-    say(d.queued ? `queued as job ${{d.job}}` : d.reason, d.queued);
-  }} catch (e) {{ say(String(e.message), false); }}
-}}
-async function rushJob(btn, id, provider) {{
-  btn.disabled = true;
-  say("queueing...", true);
-  try {{
-    const d = await post(`/jobs/${{id}}/rush?provider=${{provider}}`);
-    say(`queued as job ${{d.job}} on ${{provider}}`, true);
-  }} catch (e) {{ btn.disabled = false; say(String(e.message), false); }}
-}}
-</script>
-</body></html>"""
-
-
-LIBRARY_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<title>tarjem library</title><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
- body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:#14161a;
-      color:#d8dee9;margin:0;padding:24px}
- h1{font-size:18px;margin:0 0 4px} a{color:#88c0d0}
- .sub{color:#7b8494;margin-bottom:18px}
- table{border-collapse:collapse;width:100%;font-size:13px}
- th,td{text-align:left;padding:6px 10px;border-bottom:1px solid #262a31}
- th{color:#7b8494;font-weight:500;position:sticky;top:0;background:#14161a}
- .path{color:#8fbcbb;font-size:12px}
- .done{color:#a3be8c} .pending{color:#ebcb8b} .missing{color:#7b8494}
- button{font:inherit;font-size:12px;background:#3b4252;color:#e5e9f0;border:1px solid #4c566a;
-        border-radius:4px;padding:3px 8px;cursor:pointer;margin-right:4px}
- button:hover{background:#4c566a} button:disabled{opacity:.45;cursor:default}
- button.claude{border-color:#5e81ac}
- input{font:inherit;font-size:13px;background:#1b1f26;color:#d8dee9;border:1px solid #3b4252;
-       border-radius:4px;padding:6px 9px;width:340px;max-width:55vw}
- .bar{margin-bottom:16px} #msg{margin-left:10px;font-size:12px}
- .tab{background:#22262d;border-color:#22262d} .tab.on{background:#5e81ac;border-color:#5e81ac}
- .warn{color:#ebcb8b}
-</style></head><body>
-<h1>library <a href="/" style="font-size:12px">&larr; jobs</a></h1>
-<div class="sub" id="counts">reading the library&hellip;</div>
-<div class="bar">
-  <input id="q" placeholder="filter by title or filename" oninput="render()">
-  <button class="tab on" id="t-all" onclick="setFilter('all')">all</button>
-  <button class="tab" id="t-missing" onclick="setFilter('missing')">missing</button>
-  <button class="tab" id="t-translated" onclick="setFilter('translated')">translated</button>
-  <button onclick="load(true)">rescan</button>
-  <span id="msg"></span>
-</div>
-<table><thead><tr><th>show / film</th><th>file</th><th>state</th><th></th></tr></thead>
-<tbody id="rows"></tbody></table>
-<script>
-const TOKEN = new URLSearchParams(location.search).get("token") || "";
-const hdrs = TOKEN ? {"x-api-token": TOKEN, "Content-Type": "application/json"}
-                   : {"Content-Type": "application/json"};
-let ITEMS = [], FILTER = "all", SOURCE = "";
-function say(t, ok) {
-  const m = document.getElementById("msg");
-  m.textContent = t; m.style.color = ok ? "#a3be8c" : "#bf616a";
+  say("queueing…", true);
+  try {
+    const d = await api("POST", "/translate",
+                        {video: v, provider, rush: true, force: true});
+    say(d.queued ? `queued as job ${d.job}` : d.reason, d.queued);
+  } catch (e) { say(e.message, false); }
 }
-function esc(s) { return String(s).replace(/[&<>"]/g, c =>
-  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]); }
+async function rushJob(btn, id, provider) {
+  btn.disabled = true; say("queueing…", true);
+  try {
+    const d = await api("POST", `/jobs/${id}/rush?provider=${provider}`);
+    say(`queued as job ${d.job} on ${provider}`, true);
+  } catch (e) { btn.disabled = false; say(e.message, false); }
+}
+"""
+    return ui.shell(title="tarjem", active="jobs", heading="Activity",
+                    body=body, script=script, footer=_footer(), refresh=15)
+
+
+@app.get("/library", response_class=HTMLResponse)
+def library_page(request: Request):
+    if not auth_mod.authenticated(settings, request):
+        return RedirectResponse("/login", status_code=303)
+
+    body = """
+<div class='toolbar'>
+  <input id='q' style='width:min(340px,45vw)' placeholder='Filter by title or filename'
+         oninput='render()'>
+  <button class='tab on' id='t-all' onclick="setFilter('all')">All</button>
+  <button class='tab' id='t-missing' onclick="setFilter('missing')">Missing</button>
+  <button class='tab' id='t-translated' onclick="setFilter('translated')">Translated</button>
+  <button onclick='load(true)'>Rescan</button>
+  <span id='msg' class='msg'></span>
+</div>
+<div class='sub' id='counts' style='margin-bottom:14px'>Reading the library&hellip;</div>
+
+<div class='panel'>
+  <table>
+    <thead><tr><th>Show / Film</th><th>File</th><th>Subtitle</th><th></th></tr></thead>
+    <tbody id='rows'><tr><td colspan='4' class='empty'>Loading&hellip;</td></tr></tbody>
+  </table>
+</div>"""
+
+    script = ui.JS_BASE + """
+let ITEMS = [], FILTER = "all", SOURCE = "";
 function setFilter(f) {
   FILTER = f;
   for (const t of ["all", "missing", "translated"])
@@ -667,12 +658,11 @@ function setFilter(f) {
   render();
 }
 async function load(refresh) {
-  say(refresh ? "rescanning the library..." : "loading...", true);
-  const r = await fetch("/api/library" + (refresh ? "?refresh=true" : ""), {headers: hdrs});
-  if (!r.ok) return say("not authorised - open this page with ?token=...", false);
-  const d = await r.json();
-  ITEMS = d.items; SOURCE = d.source;
-  say("", true); render();
+  say(refresh ? "rescanning…" : "loading…", true);
+  try {
+    const d = await api("GET", "/api/library" + (refresh ? "?refresh=true" : ""));
+    ITEMS = d.items; SOURCE = d.source; say("", true); render();
+  } catch (e) { say(e.message, false); }
 }
 function render() {
   const q = document.getElementById("q").value.trim().toLowerCase();
@@ -683,242 +673,140 @@ function render() {
 
   const done = ITEMS.filter(i => i.translated).length;
   document.getElementById("counts").innerHTML =
-    `${ITEMS.length} videos &middot; ${done} translated &middot; ` +
-    `${ITEMS.length - done} without a subtitle &middot; via ${esc(SOURCE)}`;
+    ITEMS.length + " videos &middot; " + done + " translated &middot; " +
+    (ITEMS.length - done) + " without a subtitle &middot; via " + esc(SOURCE);
 
-  document.getElementById("rows").innerHTML = rows.slice(0, 1500).map(i => {
-    const state = i.translated ? `<span class="done">${esc(i.subtitle)}</span>`
-                : i.pending    ? '<span class="pending">queued</span>'
-                :                '<span class="missing">none</span>';
-    // Already translated is not a reason to refuse - it is a reason to warn.
-    // force renames the existing file to .bak rather than deleting it.
+  document.getElementById("rows").innerHTML = rows.slice(0, 1500).map(function (i) {
+    const state = i.translated
+        ? "<span class='pill done'>" + esc(i.subtitle) + "</span>"
+        : i.pending ? "<span class='pill running'>queued</span>"
+                    : "<span class='pill skipped'>none</span>";
     const dis = i.pending ? "disabled" : "";
     const redo = i.translated ? " (redo)" : "";
-    return `<tr><td>${esc(i.title)}</td>
-      <td class="path">${esc(i.name)}</td><td>${state}</td>
-      <td><button ${dis} title="run now on the local model, ahead of the queue"
-        onclick="go(this,'${encodeURIComponent(i.video)}','ollama',${!!i.translated})">local now${redo}</button>
-      <button class="claude" ${dis} title="run now on Claude, ahead of the queue"
-        onclick="go(this,'${encodeURIComponent(i.video)}','anthropic',${!!i.translated})">Claude now${redo}</button></td></tr>`;
-  }).join("") || '<tr><td colspan="4">nothing matches</td></tr>';
+    const v = encodeURIComponent(i.video);
+    return "<tr><td>" + esc(i.title) + "</td>" +
+      "<td class='sub mono'>" + esc(i.name) + "</td><td>" + state + "</td>" +
+      "<td style='white-space:nowrap'>" +
+      "<button class='primary' " + dis + " onclick=\\"go(this,'" + v + "','ollama'," +
+        (!!i.translated) + ")\\">Local" + redo + "</button>" +
+      "<button " + dis + " onclick=\\"go(this,'" + v + "','anthropic'," +
+        (!!i.translated) + ")\\">Claude" + redo + "</button>" +
+      "</td></tr>";
+  }).join("") || "<tr><td colspan='4' class='empty'>Nothing matches</td></tr>";
 }
 async function go(btn, video, provider, translated) {
   const path = decodeURIComponent(video);
   if (translated && !confirm(
       "This already has a subtitle.\\n\\nRe-translate it? The existing file is " +
       "renamed to .bak, not deleted.")) return;
-  btn.disabled = true; say("queueing...", true);
-  // Clicking a specific item always means "now" - the queue exists for the
-  // sweeper and the bazarr webhook, not for something you picked by hand.
-  const body = {video: path, force: !!translated, provider: provider, rush: true};
-  const r = await fetch("/translate", {method: "POST", headers: hdrs,
-                                        body: JSON.stringify(body)});
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok) { btn.disabled = false; return say(d.detail || r.status, false); }
-  say(d.queued ? `queued as job ${d.job}` : d.reason, d.queued);
+  btn.disabled = true; say("queueing…", true);
+  try {
+    const d = await api("POST", "/translate",
+                        {video: path, force: !!translated, provider: provider, rush: true});
+    say(d.queued ? "queued as job " + d.job : d.reason, d.queued);
+  } catch (e) { btn.disabled = false; say(e.message, false); }
 }
 load(false);
-</script></body></html>"""
-
-
-@app.get("/library", response_class=HTMLResponse)
-def library_page(request: Request):
-    if not auth_mod.authenticated(settings, request):
-        return RedirectResponse("/login", status_code=303)
-    return LIBRARY_PAGE
-
-
-
-BACKENDS_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<title>tarjem backends</title><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
- body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:#14161a;
-      color:#d8dee9;margin:0;padding:24px}
- h1{font-size:18px;margin:0 0 4px} a{color:#88c0d0}
- .sub{color:#7b8494;margin-bottom:20px}
- table{border-collapse:collapse;width:100%;max-width:1000px;font-size:13px}
- th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #262a31}
- th{color:#7b8494;font-weight:500}
- .on{color:#a3be8c} .off{color:#7b8494} .bad{color:#bf616a} .busy{color:#ebcb8b}
- button{font:inherit;font-size:12px;background:#3b4252;color:#e5e9f0;border:1px solid #4c566a;
-        border-radius:4px;padding:4px 10px;cursor:pointer;margin-right:4px}
- button:hover{background:#4c566a} button:disabled{opacity:.45;cursor:default}
- button.danger{border-color:#bf616a}
- input,select{font:inherit;font-size:13px;background:#1b1f26;color:#d8dee9;
-   border:1px solid #3b4252;border-radius:4px;padding:6px 8px;margin-right:6px}
- input.url{width:280px} input.model{width:210px}
- .add{margin-top:26px;padding:14px;background:#1b1f26;border:1px solid #262a31;border-radius:6px;
-      max-width:1000px}
- .hint{color:#7b8494;font-size:12px;margin-top:8px}
- #msg{margin-left:10px;font-size:12px}
-</style></head><body>
-<h1>backends <a href="/" style="font-size:12px">&larr; jobs</a>
-  <a href="/library" style="font-size:12px">library</a></h1>
-<div class="sub">Machines that do the translating. Turn one off to get its GPU
-  back - a job already running on it finishes first.</div>
-
-<table><thead><tr><th>backend</th><th>model</th><th>state</th><th></th></tr></thead>
-<tbody id="rows"><tr><td colspan="4">loading&hellip;</td></tr></tbody></table>
-
-<div class="add">
-  <select id="kind">
-    <option value="ollama">ollama</option>
-    <option value="openai">openai-compatible (LM Studio, vLLM, ...)</option>
-    <option value="anthropic">anthropic</option>
-  </select>
-  <input class="url" id="url" placeholder="http://192.168.1.50:11434" spellcheck="false">
-  <input class="model" id="model" placeholder="command-r7b-arabic" spellcheck="false">
-  <button onclick="add()">add backend</button>
-  <span id="msg"></span>
-  <div class="hint">An ollama backend uses the native API, which enforces the
-    output schema. Anything else goes through the OpenAI-compatible path.</div>
-</div>
-
-<script>
-const TOKEN = new URLSearchParams(location.search).get("token") || "";
-const hdrs = TOKEN ? {"x-api-token": TOKEN, "Content-Type": "application/json"}
-                   : {"Content-Type": "application/json"};
-function say(t, ok) {
-  const m = document.getElementById("msg");
-  m.textContent = t; m.style.color = ok ? "#a3be8c" : "#bf616a";
-}
-function esc(s) { return String(s).replace(/[&<>"]/g, c =>
-  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]); }
-async function api(method, path, body) {
-  const r = await fetch(path, {method, headers: hdrs,
-                               body: body ? JSON.stringify(body) : null});
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.detail || r.status);
-  return d;
-}
-function render(list) {
-  document.getElementById("rows").innerHTML = list.map(b => {
-    let state = b.enabled ? '<span class="on">enabled</span>'
-                          : '<span class="off">disabled</span>';
-    if (b.enabled && !b.healthy)
-      state += ` <span class="bad">unreachable, retrying in ${b.down_for_s}s</span>`;
-    if (b.busy) state += ' <span class="busy">&middot; translating</span>';
-    return `<tr>
-      <td>${esc(b.name)}<br><span class="off">${esc(b.kind)}</span></td>
-      <td>${esc(b.model || "(default)")}</td>
-      <td>${state}</td>
-      <td>
-        <button onclick="toggle('${esc(b.name)}',${!b.enabled})">
-          ${b.enabled ? "disable" : "enable"}</button>
-        <button class="danger" ${b.busy ? "disabled" : ""}
-          onclick="remove('${esc(b.name)}')">remove</button>
-      </td></tr>`;
-  }).join("") || '<tr><td colspan="4">no backends - tarjem will use LLM_PROVIDER instead</td></tr>';
-}
-async function load() {
-  try { render((await api("GET", "/api/backends")).backends); }
-  catch (e) { say("not authorised - open this page with ?token=...", false); }
-}
-async function toggle(name, enabled) {
-  try { render((await api("PATCH", `/api/backends/${encodeURIComponent(name)}?enabled=${enabled}`)).backends);
-        say(`${name} ${enabled ? "enabled" : "disabled"}`, true); }
-  catch (e) { say(String(e.message), false); }
-}
-async function remove(name) {
-  if (!confirm(`Remove ${name}? Its settings are lost; disable instead to keep them.`)) return;
-  try { render((await api("DELETE", `/api/backends/${encodeURIComponent(name)}`)).backends);
-        say(`${name} removed`, true); }
-  catch (e) { say(String(e.message), false); }
-}
-async function add() {
-  const url = document.getElementById("url").value.trim();
-  if (!url) return say("a url is required", false);
-  try {
-    const d = await api("POST", "/api/backends", {
-      kind: document.getElementById("kind").value,
-      url, model: document.getElementById("model").value.trim()});
-    render(d.backends); say(`added ${d.added}`, true);
-    document.getElementById("url").value = "";
-  } catch (e) { say(String(e.message), false); }
-}
-load();
-setInterval(load, 10000);
-</script></body></html>"""
+"""
+    return ui.shell(title="tarjem library", active="library", heading="Library",
+                    body=body, script=script, footer=_footer())
 
 
 @app.get("/backends", response_class=HTMLResponse)
 def backends_page(request: Request):
     if not auth_mod.authenticated(settings, request):
         return RedirectResponse("/login", status_code=303)
-    return BACKENDS_PAGE
 
+    body = """
+<div class='sub' style='margin-bottom:14px'>Machines that do the translating.
+  Disable one to get its GPU back &mdash; a job already running on it finishes
+  first.</div>
 
-@app.get("/", response_class=HTMLResponse)
-def dashboard(request: Request, status: str = ""):
-    # A browser gets the sign-in page rather than a bare 401.
-    if not auth_mod.authenticated(settings, request):
-        return RedirectResponse("/login", status_code=303)
+<div class='panel'>
+  <h2>Backends</h2>
+  <table>
+    <thead><tr><th>Backend</th><th>Model</th><th>State</th><th></th></tr></thead>
+    <tbody id='rows'><tr><td colspan='4' class='empty'>Loading&hellip;</td></tr></tbody>
+  </table>
+</div>
 
-    db = store()
-    counts = db.counts()
-    # Each count is a filter link - with a long queue the default view hides
-    # those rows, so there has to be a way back to them.
-    pills = "".join(
-        f'<a class="pill {k}" href="/?status={k}">{k}: {v}</a>'
-        for k, v in sorted(counts.items())
-    ) or '<span class="pill">no jobs yet</span>'
+<div class='panel'>
+  <h2>Add a backend</h2>
+  <div class='inner'>
+    <select id='kind'>
+      <option value='ollama'>Ollama</option>
+      <option value='openai'>OpenAI-compatible (LM Studio, vLLM&hellip;)</option>
+      <option value='anthropic'>Anthropic</option>
+    </select>
+    <input id='url' style='width:min(300px,45vw)' spellcheck='false'
+           placeholder='http://192.168.1.50:11434'>
+    <input id='model' style='width:min(220px,35vw)' spellcheck='false'
+           placeholder='command-r7b-arabic'>
+    <button class='primary' onclick='add()'>Add</button>
+    <span id='msg' class='msg'></span>
+    <div class='sub' style='margin-top:9px'>An Ollama backend uses the native
+      API, which enforces the output schema. Anything else goes through the
+      OpenAI-compatible path.</div>
+  </div>
+</div>"""
 
-    rows = []
-    # Default view hides the queue: with a real backlog it is dozens of
-    # identical rows, and it buries both the running job and the history.
-    rows_source = (db.recent(60, status=status, running_first=True) if status
-                   else db.recent(40, running_first=True, exclude=("queued",)))
-    for j in rows_source:
-        pct = int((j.get("progress") or 0) * 100)
-        stats = j.get("stats") or {}
-        if j["status"] == "done" and stats:
-            result = (f'{stats.get("translated", 0)}/{stats.get("total_cues", 0)} cues '
-                      f'&middot; {stats.get("seconds", 0)}s')
-        elif j["status"] == "failed":
-            result = f'<span class="err">{_esc(j.get("error", ""))}</span>'
-        else:
-            result = _esc(j.get("stage", ""))
-        # Rushing something already queued or running would only duplicate it.
-        action = ""
-        if j["status"] in ("failed", "done", "skipped"):
-            action = (
-                f'<button onclick="rushJob(this,{j["id"]},&quot;ollama&quot;)" '
-                f'title="re-run on the local model, ahead of the queue">local</button>'
-                f'<button onclick="rushJob(this,{j["id"]},&quot;anthropic&quot;)" '
-                f'title="re-run on Claude, ahead of the queue">Claude</button>')
-        badge = ' <span class="pill">rush</span>' if j.get("priority") else ""
-
-        rows.append(
-            f'<tr><td>{j["id"]}</td>'
-            f'<td>{_esc(j.get("title") or Path(j["video"]).name)}{badge}<br>'
-            f'<span class="path">{_esc(Path(j["video"]).name)}</span></td>'
-            f'<td class="{j["status"]}">{j["status"]}</td>'
-            f'<td><span class="bar"><i style="width:{pct}%"></i></span> {pct}%</td>'
-            f'<td>{_esc(j.get("provider") or j.get("origin") or "")}</td>'
-            f'<td>{result}</td><td>{action}</td></tr>'
-        )
-
-    keyhint = ("" if settings.anthropic_api_key else
-               " <b>ANTHROPIC_API_KEY is not set</b>, so this will fail until it is.")
-    if settings.api_token:
-        keyhint += " Open this page with ?token=... for the buttons to authenticate."
-
-    return PAGE.format(
-        provider=settings.provider,
-        model=settings.active_model,
-        target=settings.target_lang,
-        register=settings.register,
-        bazarr="ok" if state["bazarr"].ping() else "unreachable",
-        pills=pills + (
-            ' <a class="pill" href="/">show all activity</a>' if status
-            else ' <span class="pill" style="background:none;color:#7b8494">'
-                 'queued rows hidden - click a count to filter</span>'),
-        keyhint=keyhint,
-        logout=('<form method="post" action="/logout" style="display:inline">'
-                '<button style="font-size:11px">sign out</button></form>'
-                if settings.auth_enabled else ''),
-        rows="\n".join(rows) or '<tr><td colspan="7">nothing yet</td></tr>',
-    )
+    script = ui.JS_BASE + """
+function render(list) {
+  document.getElementById("rows").innerHTML = list.map(function (b) {
+    let state = b.enabled ? "<span class='pill enabled'>enabled</span>"
+                          : "<span class='pill skipped'>disabled</span>";
+    if (b.enabled && !b.healthy)
+      state += " <span class='pill failed'>unreachable, retry in " +
+               b.down_for_s + "s</span>";
+    if (b.busy) state += " <span class='pill running'>translating</span>";
+    return "<tr><td>" + esc(b.name) + "<br><span class='sub'>" + esc(b.kind) +
+      "</span></td>" +
+      "<td class='sub mono'>" + esc(b.model || "(default)") + "</td>" +
+      "<td>" + state + "</td>" +
+      "<td style='white-space:nowrap'>" +
+      "<button onclick=\\"toggle('" + esc(b.name) + "'," + (!b.enabled) + ")\\">" +
+        (b.enabled ? "Disable" : "Enable") + "</button>" +
+      "<button class='danger' " + (b.busy ? "disabled" : "") +
+        " onclick=\\"remove('" + esc(b.name) + "')\\">Remove</button>" +
+      "</td></tr>";
+  }).join("") || "<tr><td colspan='4' class='empty'>No backends configured</td></tr>";
+}
+async function load() {
+  try { render((await api("GET", "/api/backends")).backends); }
+  catch (e) { say(e.message, false); }
+}
+async function toggle(name, enabled) {
+  try {
+    const d = await api("PATCH",
+      "/api/backends/" + encodeURIComponent(name) + "?enabled=" + enabled);
+    render(d.backends);
+    say(name + (enabled ? " enabled" : " disabled"), true);
+  } catch (e) { say(e.message, false); }
+}
+async function remove(name) {
+  if (!confirm("Remove " + name +
+               "? Its settings are lost - disable instead to keep them.")) return;
+  try {
+    const d = await api("DELETE", "/api/backends/" + encodeURIComponent(name));
+    render(d.backends); say(name + " removed", true);
+  } catch (e) { say(e.message, false); }
+}
+async function add() {
+  const url = document.getElementById("url").value.trim();
+  if (!url) return say("a url is required", false);
+  try {
+    const d = await api("POST", "/api/backends", {
+      kind: document.getElementById("kind").value, url: url,
+      model: document.getElementById("model").value.trim()});
+    render(d.backends); say("added " + d.added, true);
+    document.getElementById("url").value = "";
+  } catch (e) { say(e.message, false); }
+}
+load();
+setInterval(load, 10000);
+"""
+    return ui.shell(title="tarjem backends", active="backends", heading="Backends",
+                    body=body, script=script, footer=_footer())
 
 
 def _esc(text: str) -> str:

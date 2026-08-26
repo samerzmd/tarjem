@@ -213,7 +213,7 @@ def test_rush_endpoint_requeues_an_existing_job(client, tmp_path):
 
 def test_dashboard_shows_both_rush_controls(client):
     page = client.get("/?token=secret").text
-    assert "Translate now (local)" in page and "Translate now (Claude)" in page
+    assert "Translate now" in page
     assert "rushPath('ollama')" in page and "rushPath('anthropic')" in page
 
 
@@ -351,7 +351,7 @@ def test_dashboard_hides_the_queue_but_keeps_the_running_job(client, tmp_path):
     page = client.get("/?token=secret").text
     assert "the-running-one.mkv" in page
     assert "queued0.mkv" not in page          # the queue is not rendered
-    assert 'href="/?status=queued"' in page   # but it is one click away
+    assert "/?status=queued" in page          # but it is one click away
 
 
 def test_dashboard_can_filter_to_a_single_status(client):
@@ -406,8 +406,8 @@ def test_the_rush_lane_takes_a_local_job(tmp_path):
 
 def test_library_offers_both_rush_buttons(client):
     page = client.get("/library?token=secret").text
-    assert "local now" in page and "Claude now" in page
     assert "'ollama'" in page and "'anthropic'" in page
+    assert "/api/library" in page
 
 
 # -- backend management ----------------------------------------------------
@@ -483,4 +483,5 @@ def test_a_busy_backend_cannot_be_removed(client, clean_pool):
 def test_the_backends_page_requires_auth_and_renders(client):
     assert client.get("/backends", follow_redirects=False).status_code == 303
     page = client.get("/backends?token=secret")
-    assert page.status_code == 200 and "add backend" in page.text
+    assert page.status_code == 200
+    assert "Add a backend" in page.text and "/api/backends" in page.text
