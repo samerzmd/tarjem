@@ -77,6 +77,19 @@ def token_ok(cfg: Settings, candidate: str | None) -> bool:
     return hmac.compare_digest(candidate.encode(), cfg.api_token.encode())
 
 
+def is_https(request: Request) -> bool:
+    """Did this request reach us over HTTPS?
+
+    Behind a tunnel or reverse proxy the connection to the app itself is plain
+    http on loopback, so the only honest signal is the header the proxy sets.
+    Cloudflare and nginx both send X-Forwarded-Proto.
+    """
+    forwarded = request.headers.get("x-forwarded-proto", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip().lower() == "https"
+    return request.url.scheme == "https"
+
+
 def authenticated(cfg: Settings, request: Request) -> bool:
     """True when the caller proved who they are, by any accepted route."""
     if not cfg.auth_enabled:

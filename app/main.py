@@ -98,9 +98,11 @@ def login_form(error: str = Query(default="")) -> str:
 
 
 @app.post("/login")
-def login(password: str = Form(default="")) -> Response:
+def login(request: Request, password: str = Form(default="")) -> Response:
     if not auth_mod.password_ok(settings, password):
-        log.warning("failed sign-in attempt")
+        log.warning("failed sign-in attempt from %s",
+                    request.headers.get("cf-connecting-ip")
+                    or (request.client.host if request.client else "?"))
         return RedirectResponse("/login?error=1", status_code=303)
 
     response = RedirectResponse("/", status_code=303)
@@ -110,7 +112,10 @@ def login(password: str = Form(default="")) -> Response:
         max_age=settings.session_hours * 3600,
         httponly=True,          # not readable from JavaScript
         samesite="lax",         # not sent on cross-site form posts
-        secure=settings.cookie_secure,
+        # Decided per request, not per deployment. Forcing it on would mean a
+        # session obtained over plain http on the LAN is never sent back, so
+        # signing in there would appear to succeed and then silently fail.
+        secure=settings.cookie_secure or auth_mod.is_https(request),
         path="/",
     )
     return response

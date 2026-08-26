@@ -84,3 +84,27 @@ def test_auth_is_off_only_when_nothing_is_configured():
     assert not Settings().auth_enabled
     assert Settings(api_token="t").auth_enabled
     assert Settings(auth_password="p").auth_enabled
+
+
+# -- https detection -------------------------------------------------------
+# Behind a tunnel the app itself is plain http on loopback, so forcing Secure
+# cookies on would break LAN access while looking like it had worked.
+
+class _Req:
+    def __init__(self, headers=None, scheme="http"):
+        self.headers = headers or {}
+        self.url = type("U", (), {"scheme": scheme})()
+
+
+def test_forwarded_proto_is_believed():
+    assert auth.is_https(_Req({"x-forwarded-proto": "https"}))
+    assert not auth.is_https(_Req({"x-forwarded-proto": "http"}))
+
+
+def test_a_forwarded_proto_chain_uses_the_first_hop():
+    assert auth.is_https(_Req({"x-forwarded-proto": "https, http"}))
+
+
+def test_falls_back_to_the_connection_scheme():
+    assert auth.is_https(_Req(scheme="https"))
+    assert not auth.is_https(_Req(scheme="http"))
