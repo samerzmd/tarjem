@@ -56,6 +56,10 @@ class Provider(ABC):
 
     def __init__(self) -> None:
         self.usage = Usage()
+        # Set when the backend could not be reached at all, as opposed to
+        # answering with an error. The endpoint pool uses it to park a machine
+        # that has gone to sleep instead of failing every job sent to it.
+        self.unreachable = False
 
     @abstractmethod
     def structured(

@@ -43,7 +43,7 @@ def rig(tmp_path, monkeypatch):
     cfg.data_dir = tmp_path / "data"
 
     provider = StubProvider()
-    monkeypatch.setattr(worker, "build_provider", lambda _cfg: provider)
+    monkeypatch.setattr(worker, "build_provider", lambda _cfg, _ep=None: provider)
 
     store = Store(cfg.data_dir / "test.db")
     bazarr = FakeBazarr()
@@ -171,7 +171,7 @@ def test_a_file_where_nothing_translated_fails_and_writes_no_file(rig, tmp_path,
     """The worst outcome is a .ar.srt full of untranslated English: it looks
     like success, and it blocks every retry because the target now exists."""
     cfg, store, _bazarr, _provider, pipeline = rig
-    monkeypatch.setattr(worker, "build_provider", lambda _cfg: DeadProvider())
+    monkeypatch.setattr(worker, "build_provider", lambda _cfg, _ep=None: DeadProvider())
     video = make_media(tmp_path)
 
     job_id = store.enqueue(str(video), "", "", "sweep")
@@ -187,7 +187,7 @@ def test_a_file_where_nothing_translated_fails_and_writes_no_file(rig, tmp_path,
 
 def test_a_partial_failure_still_writes_what_it_got(rig, tmp_path, monkeypatch):
     cfg, store, _bazarr, _provider, pipeline = rig
-    monkeypatch.setattr(worker, "build_provider", lambda _cfg: StubProvider(drop={0, 1}))
+    monkeypatch.setattr(worker, "build_provider", lambda _cfg, _ep=None: StubProvider(drop={0, 1}))
     video = make_media(tmp_path)
 
     job_id = store.enqueue(str(video), "", "", "sweep")

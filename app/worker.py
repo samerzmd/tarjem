@@ -13,6 +13,7 @@ from pathlib import Path
 from . import sources, srt
 from .bazarr import BazarrClient
 from .config import Settings
+from .endpoints import Endpoint, Pool
 from .providers import ProviderError, build_provider
 from .store import DONE, FAILED, SKIPPED, Store
 from .translate import TitleGlossary, Translator
@@ -47,10 +48,12 @@ def display_title(video: Path) -> str:
 class Pipeline:
     """Turns one video into one Arabic sidecar."""
 
-    def __init__(self, cfg: Settings, store: Store, bazarr: BazarrClient):
+    def __init__(self, cfg: Settings, store: Store, bazarr: BazarrClient,
+                 pool: Pool | None = None):
         self.cfg = cfg
         self.store = store
         self.bazarr = bazarr
+        self.pool = pool
 
     def run(self, job: dict) -> None:
         job_id = job["id"]
@@ -109,9 +112,21 @@ class Pipeline:
             log.info("job %s: overriding provider to %s (%s)",
                      job_id, cfg.provider, cfg.active_model)
 
+        # With a pool configured, take a backend of our own so two workers do
+        # not both drive the same GPU while another sits idle. A job that names
+        # its own provider (a rush on Claude) bypasses the pool entirely.
+        endpoint: Endpoint | None = None
+        if self.pool and not job.get("provider"):
+            endpoint = self.pool.acquire()
+            if endpoint is None:
+                self.store.update(job_id, status="queued", stage="waiting for a free backend")
+                return
+            self.store.update(job_id, stage=f"on {endpoint.name}")
+
         try:
-            provider = build_provider(cfg)
+            provider = build_provider(cfg, endpoint)
         except ProviderError as exc:
+            self.pool and self.pool.release(endpoint)
             self.store.finish(job_id, FAILED, error=f"cannot use {cfg.provider}: {exc}")
             return
 
@@ -162,6 +177,15 @@ class Pipeline:
                               usage=provider.usage.as_dict())
         finally:
             provider.close()
+            if endpoint is not None:
+                # A backend that could not be reached at all is parked for a
+                # while - a desktop that went to sleep should not fail every
+                # job handed to it before the pool notices.
+                if getattr(provider, "unreachable", False):
+                    endpoint.mark_down("connection failed")
+                else:
+                    endpoint.mark_up()
+                self.pool.release(endpoint)
 
     # -- steps ------------------------------------------------------------
 
@@ -232,11 +256,12 @@ class Worker(threading.Thread):
     """Drains the job queue one video at a time."""
 
     def __init__(self, cfg: Settings, store: Store, bazarr: BazarrClient,
-                 name: str = "worker", priority_only: bool = False):
+                 name: str = "worker", priority_only: bool = False,
+                 pool: Pool | None = None):
         super().__init__(name=name, daemon=True)
         self.cfg = cfg
         self.store = store
-        self.pipeline = Pipeline(cfg, store, bazarr)
+        self.pipeline = Pipeline(cfg, store, bazarr, pool)
         # The rush lane takes only priority jobs. They run on a different
         # provider, so they must not queue behind a local job with hours left.
         self.priority_only = priority_only

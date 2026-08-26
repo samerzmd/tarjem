@@ -15,6 +15,7 @@ from . import auth as auth_mod
 from . import sources
 from .bazarr import BazarrClient
 from .config import settings
+from .endpoints import Pool, parse as parse_endpoints
 from .store import Store
 from .worker import Sweeper, Worker, display_title, series_key
 
@@ -31,13 +32,23 @@ state: dict = {}
 async def lifespan(app: FastAPI):
     store = Store(settings.data_dir / "tarjem.db")
     bazarr = BazarrClient(settings)
-    workers = [Worker(settings, store, bazarr, name=f"worker-{i + 1}")
-               for i in range(max(1, settings.workers))]
+
+    # One worker per backend by default: routing alone buys nothing, since a
+    # single worker sends one batch at a time whichever machine answers it.
+    pool = Pool(parse_endpoints(settings.llm_endpoints))
+    count = max(settings.workers, len(pool.endpoints)) if pool else max(1, settings.workers)
+    if pool:
+        log.info("%d backend(s) in the pool: %s", len(pool.endpoints),
+                 ", ".join(e.name for e in pool.endpoints))
+
+    workers = [Worker(settings, store, bazarr, name=f"worker-{i + 1}", pool=pool)
+               for i in range(count)]
     # A lane of its own for anything picked by hand. Whatever provider it names,
     # the point is that it starts now instead of behind a backlog the sweeper
     # built. A local rush does share the GPU with the main worker, so the two
     # interleave - still far better than waiting out the queue.
-    workers.append(Worker(settings, store, bazarr, name="rush", priority_only=True))
+    workers.append(Worker(settings, store, bazarr, name="rush",
+                          priority_only=True, pool=pool))
     for worker in workers:
         worker.start()
 
@@ -45,7 +56,8 @@ async def lifespan(app: FastAPI):
     if settings.sweep_enabled:
         sweeper.start()
 
-    state.update(store=store, bazarr=bazarr, workers=workers, sweeper=sweeper, started=time.time())
+    state.update(store=store, bazarr=bazarr, workers=workers, sweeper=sweeper,
+                 pool=pool, started=time.time())
     log.info("tarjem up | provider=%s model=%s target=%s register=%s",
              settings.provider, settings.active_model, settings.target_lang, settings.register)
     auth_mod.warn_if_open(settings)
@@ -192,6 +204,8 @@ def health(request: Request) -> dict:
         "jobs": store().counts(),
         "dry_run": settings.dry_run,
         "auth": settings.auth_enabled,
+        "workers": len(state["workers"]),
+        "backends": state["pool"].status() if state["pool"] else [],
     }
 
 

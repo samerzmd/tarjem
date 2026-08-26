@@ -103,6 +103,11 @@ class Settings:
     # Raw JSON merged into the request body - for server-specific switches such
     # as Ollama's {"think": false} or a fixed {"temperature": 0.2}.
     llm_extra_body: str = _str("LLM_EXTRA_BODY")
+    # Several backends sharing the work, e.g. two machines with a GPU each:
+    #   ollama@http://host.docker.internal:11434#command-r7b-arabic,
+    #   openai@http://192.168.1.7:1234/v1#command-r7b-arabic
+    # Empty means the single provider configured above. See app/endpoints.py.
+    llm_endpoints: str = _str("LLM_ENDPOINTS")
 
     # --- where the media lives ------------------------------------------
     media_roots: list[str] = field(default_factory=lambda: _list("MEDIA_ROOTS", "/media/movies,/media/tv"))

@@ -78,6 +78,7 @@ class OllamaProvider(Provider):
             try:
                 response = self.client.post("/api/chat", json=payload)
             except httpx.RequestError as exc:
+                self.unreachable = True
                 raise ProviderError(f"connection error: {exc}", retryable=True) from exc
 
             if response.status_code < 400:
