@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -44,6 +45,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.model:
         settings.model = args.model
         settings.openai_model = args.model
+
+    # Check we can write the result before spending minutes and money making
+    # it. Finding out at the end that the directory is not writable throws away
+    # the whole run.
+    if args.output:
+        parent = args.output.parent if str(args.output.parent) else Path(".")
+        if not os.access(parent, os.W_OK):
+            print(f"cannot write to {parent} - pick a writable path for -o", file=sys.stderr)
+            return 2
 
     if not args.input.exists():
         print(f"no such file: {args.input}", file=sys.stderr)

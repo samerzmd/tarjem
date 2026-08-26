@@ -35,3 +35,14 @@ def test_analyze_reports_repeats_without_calling_a_model(tmp_path, capsys):
     assert main([str(srt_file), "--analyze"]) == 0
     err = capsys.readouterr().err
     assert "total cues" in err and "repeats" in err
+
+
+def test_an_unwritable_output_path_is_caught_before_any_work(tmp_path, capsys):
+    """It used to translate the whole file and then fail on write, losing it all."""
+    src = tmp_path / "s.en.srt"
+    src.write_text("\n\n".join(
+        f"{i}\n00:00:{i:02d},000 --> 00:00:{i+1:02d},000\nLine {i}." for i in range(1, 8)
+    ), encoding="utf-8")
+
+    assert main([str(src), "-o", "/definitely/not/writable/out.srt"]) == 2
+    assert "cannot write to" in capsys.readouterr().err
