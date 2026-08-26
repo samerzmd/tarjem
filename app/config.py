@@ -130,6 +130,11 @@ class Settings:
     sweep_interval_min: int = _int("SWEEP_INTERVAL_MIN", 360)
     sweep_source: str = _str("SWEEP_SOURCE", "bazarr")  # bazarr | disk
     sweep_limit: int = _int("SWEEP_LIMIT", 50)
+    # How long a failed video is left alone before a sweep tries it again.
+    # A failure is usually "no subtitle to translate from yet", which becomes
+    # untrue once Bazarr finds one - so it is worth retrying, just not on
+    # every pass. The bazarr webhook still queues immediately when one lands.
+    retry_failed_hours: float = float(_int("RETRY_FAILED_HOURS", 24))
     dry_run: bool = _bool("DRY_RUN", False)
     log_level: str = _str("LOG_LEVEL", "INFO").upper()
 

@@ -354,7 +354,7 @@ class Sweeper(threading.Thread):
         limit = limit or self.cfg.sweep_limit
         candidates, _ = self.candidates()
 
-        queued = 0
+        queued = skipped = 0
         for cand in candidates:
             if queued >= limit:
                 break
@@ -364,6 +364,9 @@ class Sweeper(threading.Thread):
                 continue
             if sources.has_target(video, self.cfg):
                 continue
+            if self.store.failed_recently(path, self.cfg.retry_failed_hours):
+                skipped += 1
+                continue
             enqueued = self.store.enqueue(
                 path, cand["title"], cand["key"], "sweep",
                 cand.get("kind", ""), cand.get("series_id", 0), cand.get("item_id", 0),
@@ -371,7 +374,8 @@ class Sweeper(threading.Thread):
             if enqueued is not None:
                 queued += 1
 
-        result = {"candidates": len(candidates), "queued": queued, "source": self.cfg.sweep_source}
+        result = {"candidates": len(candidates), "queued": queued,
+                  "skipped_recent_failures": skipped, "source": self.cfg.sweep_source}
         log.info("sweep: %s", result)
         return result
 

@@ -250,3 +250,33 @@ def test_collapsing_can_be_turned_off(rig, tmp_path):
     pipeline.run(dict(store.claim_next()))
     written = srt.parse((folder / "Show.S01E01.ar.srt").read_text(encoding="utf-8"))
     assert len(written) == 18
+
+
+def test_a_sweep_walks_past_recent_failures(rig, tmp_path, monkeypatch):
+    """Otherwise 217 candidates with no source mean the same five are retried
+    forever while the rest are never looked at."""
+    cfg, store, bazarr, _provider, _pipeline = rig
+    cfg.sweep_limit = 2
+    cfg.retry_failed_hours = 24
+
+    made = []
+    for n in range(5):
+        v = tmp_path / f"show{n}" / "Season 1" / f"ep{n}.mkv"
+        v.parent.mkdir(parents=True)
+        v.write_bytes(b"x")
+        made.append({"video": v, "title": f"show{n}", "key": f"show{n}"})
+
+    sweeper = worker.Sweeper(cfg, store, bazarr)
+    monkeypatch.setattr(sweeper, "candidates", lambda: (made, "disk"))
+
+    first = sweeper.sweep()
+    assert first["queued"] == 2
+    # they all fail for want of a source
+    while (job := store.claim_next()):
+        store.finish(job["id"], FAILED, error="no usable source subtitle found")
+
+    second = sweeper.sweep()
+    assert second["queued"] == 2, "should move on to the next two"
+    assert second["skipped_recent_failures"] == 2
+    queued = {Path(j["video"]).name for j in store.recent(10, status="queued")}
+    assert queued == {"ep2.mkv", "ep3.mkv"}

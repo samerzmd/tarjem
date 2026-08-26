@@ -1,6 +1,7 @@
 """Schema migration: an existing database must gain new columns, not break."""
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -133,3 +134,22 @@ def test_a_job_with_no_backend_recorded_is_left_out(tmp_path):
     store.claim_next()
     store.finish(job, "done", stats={"total_cues": 50})
     assert store.work_by_backend() == {}
+
+
+def test_failed_recently_lets_the_sweeper_move_on(tmp_path):
+    """The sweeper excluded done and pending jobs but not failed ones, so it
+    re-queued the same first few candidates every pass and never reached the
+    rest of the list."""
+    store = Store(tmp_path / "retry.db")
+    job = store.enqueue("/m/nosubs.mkv")
+    store.claim_next()
+    store.finish(job, "failed", error="no usable source subtitle found")
+
+    assert store.failed_recently("/m/nosubs.mkv", hours=24)
+    assert not store.failed_recently("/m/other.mkv", hours=24)
+    # the guard can be turned off entirely
+    assert not store.failed_recently("/m/nosubs.mkv", hours=0)
+
+    # ...and it is retried eventually - a subtitle may turn up later
+    store.update(job, finished_at=time.time() - 48 * 3600)
+    assert not store.failed_recently("/m/nosubs.mkv", hours=24)

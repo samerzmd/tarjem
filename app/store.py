@@ -223,6 +223,22 @@ class Store:
             ).fetchone()
         return row is not None
 
+    def failed_recently(self, video: str, hours: float) -> bool:
+        """Did this video fail lately?
+
+        Without this the sweeper re-queues the same first few candidates every
+        pass - they fail, they are still not "done", so they are picked again -
+        and never reaches the rest of the list.
+        """
+        if hours <= 0:
+            return False
+        with self._lock:
+            row = self._db.execute(
+                "SELECT 1 FROM jobs WHERE video=? AND status=? AND finished_at > ? LIMIT 1",
+                (video, FAILED, time.time() - hours * 3600),
+            ).fetchone()
+        return row is not None
+
     def is_pending(self, video: str) -> bool:
         with self._lock:
             row = self._db.execute(
