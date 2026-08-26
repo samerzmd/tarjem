@@ -18,7 +18,8 @@ from .bazarr import BazarrClient
 from .config import settings
 from .endpoints import Pool, parse as parse_endpoints
 from .store import Store
-from .worker import Sweeper, Worker, display_title, series_key
+from .worker import (Sweeper, Worker, display_title, episode_number, media_kind,
+                     series_key)
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level, logging.INFO),
@@ -324,6 +325,49 @@ def rush(job_id: int, provider: str = Query(default="anthropic")) -> dict:
     return {"queued": True, "job": new_id, "provider": name}
 
 
+class BulkRequest(BaseModel):
+    videos: list[str]
+    provider: str | None = None
+    rush: bool = True
+    force: bool = False
+
+
+@app.post("/translate/bulk", dependencies=[Depends(auth)])
+def translate_bulk(req: BulkRequest) -> dict:
+    """Queue a whole season, or a hand-picked set, in one go."""
+    if not req.videos:
+        raise HTTPException(status_code=400, detail="no videos given")
+    if len(req.videos) > 2000:
+        raise HTTPException(status_code=400, detail="too many at once - 2000 max")
+
+    provider = _check_provider(req.provider)
+    db = store()
+    queued, skipped, missing = [], [], []
+
+    for raw in req.videos:
+        video = Path(settings.to_local(raw))
+        if not video.is_file():
+            missing.append(raw)
+            continue
+        existing = sources.has_target(video, settings)
+        if existing and not req.force:
+            skipped.append(raw)
+            continue
+        if existing and req.force:
+            existing.rename(existing.with_suffix(existing.suffix + ".bak"))
+
+        job = db.enqueue(
+            str(video), display_title(video), series_key(video),
+            "bulk", provider=provider, priority=1 if req.rush else 0,
+        )
+        (queued if job is not None else skipped).append(raw)
+
+    log.info("bulk: queued %d, skipped %d, missing %d (provider=%s)",
+             len(queued), len(skipped), len(missing), provider or settings.provider)
+    return {"queued": len(queued), "skipped": len(skipped),
+            "missing": len(missing), "provider": provider or settings.provider}
+
+
 @app.post("/sweep", dependencies=[Depends(auth)])
 def sweep(limit: int = Query(default=0, ge=0, le=1000)) -> dict:
     state.pop("library", None)          # the queue just changed; re-read it
@@ -350,18 +394,25 @@ def _library(refresh: bool = False) -> tuple[list[dict], str]:
         video = cand["video"]
         path = str(video)
         existing = sources.has_target(video, settings)
+        season, number = episode_number(video)
         items.append({
             "video": path,
             "title": cand["title"],
             "series": cand["key"],
             "name": video.name,
+            "kind": media_kind(video, settings.media_roots),
+            "season": season,
+            "episode": number,
             "translated": existing is not None,
             "subtitle": existing.name if existing else "",
             "pending": db.is_pending(path),
             # Bazarr still wants the target language for this one.
             "wanted": path in wanted,
         })
-    items.sort(key=lambda i: (i["series"].lower(), i["name"].lower()))
+    # Grouped by series, then in broadcast order where it can be read - a
+    # season list that jumps about by filename is no easier than a flat one.
+    items.sort(key=lambda i: (i["series"].lower(), i["season"], i["episode"],
+                              i["name"].lower()))
     source = "disk + bazarr" if wanted else "disk"
     state["library"] = {"items": items, "source": source, "at": time.time()}
     return items, source
@@ -642,86 +693,9 @@ def library_page(request: Request):
     if not auth_mod.authenticated(settings, request):
         return RedirectResponse("/login", status_code=303)
 
-    body = """
-<div class='toolbar'>
-  <input id='q' style='width:min(340px,45vw)' placeholder='Filter by title or filename'
-         oninput='render()'>
-  <button class='tab on' id='t-all' onclick="setFilter('all')">All</button>
-  <button class='tab' id='t-missing' onclick="setFilter('missing')">Missing</button>
-  <button class='tab' id='t-translated' onclick="setFilter('translated')">Translated</button>
-  <button onclick='load(true)'>Rescan</button>
-  <span id='msg' class='msg'></span>
-</div>
-<div class='sub' id='counts' style='margin-bottom:14px'>Reading the library&hellip;</div>
-
-<div class='panel'>
-  <table>
-    <thead><tr><th>Show / Film</th><th>File</th><th>Subtitle</th><th></th></tr></thead>
-    <tbody id='rows'><tr><td colspan='4' class='empty'>Loading&hellip;</td></tr></tbody>
-  </table>
-</div>"""
-
-    script = ui.JS_BASE + """
-let ITEMS = [], FILTER = "all", SOURCE = "";
-function setFilter(f) {
-  FILTER = f;
-  for (const t of ["all", "missing", "translated"])
-    document.getElementById("t-" + t).classList.toggle("on", t === f);
-  render();
-}
-async function load(refresh) {
-  say(refresh ? "rescanning…" : "loading…", true);
-  try {
-    const d = await api("GET", "/api/library" + (refresh ? "?refresh=true" : ""));
-    ITEMS = d.items; SOURCE = d.source; say("", true); render();
-  } catch (e) { say(e.message, false); }
-}
-function render() {
-  const q = document.getElementById("q").value.trim().toLowerCase();
-  let rows = ITEMS.filter(i => !q || i.title.toLowerCase().includes(q)
-                                  || i.name.toLowerCase().includes(q));
-  if (FILTER === "missing") rows = rows.filter(i => !i.translated);
-  if (FILTER === "translated") rows = rows.filter(i => i.translated);
-
-  const done = ITEMS.filter(i => i.translated).length;
-  document.getElementById("counts").innerHTML =
-    ITEMS.length + " videos &middot; " + done + " translated &middot; " +
-    (ITEMS.length - done) + " without a subtitle &middot; via " + esc(SOURCE);
-
-  document.getElementById("rows").innerHTML = rows.slice(0, 1500).map(function (i) {
-    const state = i.translated
-        ? "<span class='pill done'>" + esc(i.subtitle) + "</span>"
-        : i.pending ? "<span class='pill running'>queued</span>"
-                    : "<span class='pill skipped'>none</span>";
-    const dis = i.pending ? "disabled" : "";
-    const redo = i.translated ? " (redo)" : "";
-    const v = encodeURIComponent(i.video);
-    return "<tr><td>" + esc(i.title) + "</td>" +
-      "<td class='sub mono'>" + esc(i.name) + "</td><td>" + state + "</td>" +
-      "<td style='white-space:nowrap'>" +
-      "<button class='primary' " + dis + " onclick=\\"go(this,'" + v + "','ollama'," +
-        (!!i.translated) + ")\\">Local" + redo + "</button>" +
-      "<button " + dis + " onclick=\\"go(this,'" + v + "','anthropic'," +
-        (!!i.translated) + ")\\">Claude" + redo + "</button>" +
-      "</td></tr>";
-  }).join("") || "<tr><td colspan='4' class='empty'>Nothing matches</td></tr>";
-}
-async function go(btn, video, provider, translated) {
-  const path = decodeURIComponent(video);
-  if (translated && !confirm(
-      "This already has a subtitle.\\n\\nRe-translate it? The existing file is " +
-      "renamed to .bak, not deleted.")) return;
-  btn.disabled = true; say("queueing…", true);
-  try {
-    const d = await api("POST", "/translate",
-                        {video: path, force: !!translated, provider: provider, rush: true});
-    say(d.queued ? "queued as job " + d.job : d.reason, d.queued);
-  } catch (e) { btn.disabled = false; say(e.message, false); }
-}
-load(false);
-"""
-    return ui.shell(title="tarjem library", active="library", heading="Library",
-                    body=body, script=script, footer=_footer())
+    return ui.shell(title='tarjem library', active='library', heading='Library',
+                    body=LIBRARY_BODY, script=ui.JS_BASE + LIBRARY_JS,
+                    footer=_footer())
 
 
 @app.get("/backends", response_class=HTMLResponse)
@@ -826,3 +800,8 @@ setInterval(load, 10000);
 def _esc(text: str) -> str:
     return (str(text).replace("&", "&amp;").replace("<", "&lt;")
             .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+LIBRARY_BODY = '\n<div class=\'toolbar\'>\n  <button class=\'tab on\' id=\'k-episode\' onclick="setKind(\'episode\')">Series</button>\n  <button class=\'tab\' id=\'k-movie\' onclick="setKind(\'movie\')">Movies</button>\n  <span style=\'width:14px\'></span>\n  <input id=\'q\' style=\'width:min(300px,38vw)\' placeholder=\'Filter\' oninput=\'render()\'>\n  <button class=\'tab on\' id=\'t-all\' onclick="setFilter(\'all\')">All</button>\n  <button class=\'tab\' id=\'t-missing\' onclick="setFilter(\'missing\')">Missing</button>\n  <button class=\'tab\' id=\'t-translated\' onclick="setFilter(\'translated\')">Done</button>\n  <button onclick=\'load(true)\'>Rescan</button>\n  <span id=\'msg\' class=\'msg\'></span>\n</div>\n\n<div class=\'panel\' id=\'selbar\' style=\'display:none\'>\n  <div class=\'inner\'>\n    <b id=\'selcount\'>0 selected</b>\n    <span style=\'margin:0 12px\'>\n      <button class=\'primary\' onclick="runSelected(\'ollama\')">Translate on local</button>\n      <button onclick="runSelected(\'anthropic\')">Translate on Claude</button>\n      <button onclick=\'clearSel()\'>Clear</button>\n    </span>\n    <label class=\'sub\'><input type=\'checkbox\' id=\'redo\' style=\'margin-right:5px\'>\n      include ones that already have a subtitle (renames the old to .bak)</label>\n  </div>\n</div>\n\n<div class=\'sub\' id=\'counts\' style=\'margin-bottom:14px\'>Reading the library&hellip;</div>\n<div id=\'groups\'></div>\n'
+
+LIBRARY_JS = '\nlet ITEMS = [], KIND = "episode", FILTER = "all", SOURCE = "";\nlet OPEN = new Set(), SEL = new Set();\n\nfunction setKind(k) {\n  KIND = k;\n  for (const t of ["episode", "movie"])\n    document.getElementById("k-" + t).classList.toggle("on", t === k);\n  render();\n}\nfunction setFilter(f) {\n  FILTER = f;\n  for (const t of ["all", "missing", "translated"])\n    document.getElementById("t-" + t).classList.toggle("on", t === f);\n  render();\n}\nfunction matching() {\n  const q = document.getElementById("q").value.trim().toLowerCase();\n  return ITEMS.filter(function (i) {\n    if (i.kind !== KIND) return false;\n    if (FILTER === "missing" && i.translated) return false;\n    if (FILTER === "translated" && !i.translated) return false;\n    if (q && !i.title.toLowerCase().includes(q)\n          && !i.name.toLowerCase().includes(q)\n          && !i.series.toLowerCase().includes(q)) return false;\n    return true;\n  });\n}\nfunction grouped(rows) {\n  const map = new Map();\n  for (const i of rows) {\n    if (!map.has(i.series)) map.set(i.series, []);\n    map.get(i.series).push(i);\n  }\n  return map;\n}\nfunction state(i) {\n  if (i.translated) return "<span class=\'pill done\'>done</span>";\n  if (i.pending) return "<span class=\'pill running\'>queued</span>";\n  return "<span class=\'pill skipped\'>missing</span>";\n}\nfunction epLabel(i) {\n  if (i.season || i.episode)\n    return "S" + String(i.season).padStart(2, "0") +\n           "E" + String(i.episode).padStart(2, "0");\n  return "";\n}\n\nfunction render() {\n  const rows = matching();\n  const groups = grouped(rows);\n  const done = ITEMS.filter(i => i.kind === KIND && i.translated).length;\n  const total = ITEMS.filter(i => i.kind === KIND).length;\n  document.getElementById("counts").innerHTML =\n    total + (KIND === "movie" ? " films" : " episodes") + " &middot; " +\n    done + " translated &middot; " + (total - done) + " without a subtitle" +\n    " &middot; " + groups.size + (KIND === "movie" ? " titles" : " series") +\n    " &middot; via " + esc(SOURCE);\n\n  const out = [];\n  for (const [series, eps] of [...groups.entries()].sort((a, b) =>\n        a[0].toLowerCase() < b[0].toLowerCase() ? -1 : 1)) {\n    const miss = eps.filter(e => !e.translated && !e.pending).length;\n    const open = OPEN.has(series) || KIND === "movie" || groups.size === 1;\n    const chosen = eps.filter(e => SEL.has(e.video)).length;\n\n    out.push("<div class=\'panel\'><h2 style=\'cursor:pointer;display:flex;" +\n      "align-items:center;gap:10px\' onclick=\\"toggleGroup(\'" +\n      esc(series).replace(/\'/g, "\\\\\'") + "\')\\">" +\n      "<span style=\'width:10px\'>" + (open ? "&#9662;" : "&#9656;") + "</span>" +\n      "<span style=\'text-transform:none;font-size:14px;color:#ccc\'>" +\n        esc(series) + "</span>" +\n      "<span class=\'sub\' style=\'text-transform:none\'>" + eps.length +\n        (KIND === "movie" ? " file" : " ep") + (eps.length === 1 ? "" : "s") +\n        (miss ? " &middot; " + miss + " missing" : " &middot; all done") +\n        (chosen ? " &middot; " + chosen + " selected" : "") + "</span>" +\n      "<span style=\'flex:1\'></span>" +\n      (miss ? "<button onclick=\\"event.stopPropagation();selectGroup(\'" +\n        esc(series).replace(/\'/g, "\\\\\'") + "\')\\">Select missing</button>" : "") +\n      "</h2>");\n\n    if (open) {\n      out.push("<table><tbody>");\n      for (const i of eps) {\n        const v = encodeURIComponent(i.video);\n        out.push("<tr>" +\n          "<td style=\'width:34px\'><input type=\'checkbox\' " +\n            (SEL.has(i.video) ? "checked" : "") +\n            " onchange=\\"pick(\'" + v + "\',this.checked)\\"></td>" +\n          "<td style=\'width:70px\' class=\'sub\'>" + epLabel(i) + "</td>" +\n          "<td class=\'sub mono\'>" + esc(i.name) + "</td>" +\n          "<td style=\'width:110px\'>" + state(i) + "</td>" +\n          "<td style=\'width:180px;white-space:nowrap\'>" +\n            "<button class=\'primary\' " + (i.pending ? "disabled" : "") +\n              " onclick=\\"one(\'" + v + "\',\'ollama\'," + (!!i.translated) +\n              ")\\">Local</button>" +\n            "<button " + (i.pending ? "disabled" : "") +\n              " onclick=\\"one(\'" + v + "\',\'anthropic\'," + (!!i.translated) +\n              ")\\">Claude</button>" +\n          "</td></tr>");\n      }\n      out.push("</tbody></table>");\n    }\n    out.push("</div>");\n  }\n  document.getElementById("groups").innerHTML =\n    out.join("") || "<div class=\'panel\'><div class=\'empty\'>Nothing matches</div></div>";\n  updateSel();\n}\n\nfunction toggleGroup(series) {\n  OPEN.has(series) ? OPEN.delete(series) : OPEN.add(series);\n  render();\n}\nfunction selectGroup(series) {\n  for (const i of matching())\n    if (i.series === series && !i.translated && !i.pending) SEL.add(i.video);\n  OPEN.add(series);\n  render();\n}\nfunction pick(video, on) {\n  const v = decodeURIComponent(video);\n  on ? SEL.add(v) : SEL.delete(v);\n  updateSel();\n}\nfunction clearSel() { SEL.clear(); render(); }\nfunction updateSel() {\n  document.getElementById("selbar").style.display = SEL.size ? "" : "none";\n  document.getElementById("selcount").textContent = SEL.size + " selected";\n}\n\nasync function one(video, provider, translated) {\n  const path = decodeURIComponent(video);\n  if (translated && !confirm(\n      "This already has a subtitle.\\n\\nRe-translate it? The existing file is " +\n      "renamed to .bak, not deleted.")) return;\n  say("queueing…", true);\n  try {\n    const d = await api("POST", "/translate",\n      {video: path, force: !!translated, provider: provider, rush: true});\n    say(d.queued ? "queued as job " + d.job : d.reason, d.queued);\n    if (d.queued) markPending([path]);\n  } catch (e) { say(e.message, false); }\n}\n\nasync function runSelected(provider) {\n  const videos = [...SEL];\n  if (!videos.length) return;\n  const force = document.getElementById("redo").checked;\n  if (!confirm("Translate " + videos.length + " file" +\n               (videos.length === 1 ? "" : "s") + " on " + provider + "?" +\n               (force ? "\\n\\nExisting subtitles are renamed to .bak." : ""))) return;\n  say("queueing " + videos.length + "…", true);\n  try {\n    const d = await api("POST", "/translate/bulk",\n                        {videos: videos, provider: provider, rush: true, force: force});\n    say("queued " + d.queued + (d.skipped ? ", skipped " + d.skipped : "") +\n        (d.missing ? ", " + d.missing + " not found" : ""), true);\n    markPending(videos); SEL.clear(); render();\n  } catch (e) { say(e.message, false); }\n}\n\nfunction markPending(videos) {\n  const set = new Set(videos);\n  for (const i of ITEMS) if (set.has(i.video)) i.pending = true;\n  render();\n}\n\nasync function load(refresh) {\n  say(refresh ? "rescanning…" : "loading…", true);\n  try {\n    const d = await api("GET", "/api/library" + (refresh ? "?refresh=true" : ""));\n    ITEMS = d.items; SOURCE = d.source; say("", true); render();\n  } catch (e) { say(e.message, false); }\n}\nload(false);\n'

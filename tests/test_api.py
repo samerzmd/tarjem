@@ -485,3 +485,86 @@ def test_the_backends_page_requires_auth_and_renders(client):
     page = client.get("/backends?token=secret")
     assert page.status_code == 200
     assert "Add a backend" in page.text and "/api/backends" in page.text
+
+
+# -- library grouping and bulk enqueue -------------------------------------
+
+def _lib(monkeypatch, tmp_path, spec):
+    """spec: (relative path, already_translated) pairs under a media root."""
+    from app import main as m
+    made = []
+    for rel, done in spec:
+        v = tmp_path / rel
+        v.parent.mkdir(parents=True, exist_ok=True)
+        v.write_bytes(b"x")
+        if done:
+            (v.parent / (v.stem + ".ar.srt")).write_text("1\n00:00:01,000 --> 00:00:02,000\nx\n")
+        made.append({"video": v, "title": v.stem, "key": v.parent.parent.name or v.parent.name})
+    monkeypatch.setattr(m.state["sweeper"], "everything", lambda: (made, set()))
+    m.state.pop("library", None)
+    m.settings.media_roots = [str(tmp_path / "movies"), str(tmp_path / "tv")]
+    return made
+
+
+def test_library_separates_series_from_films(client, tmp_path, monkeypatch):
+    _lib(monkeypatch, tmp_path, [
+        ("tv/The Expanse/Season 2/The.Expanse.S02E03.mkv", False),
+        ("tv/The Expanse/Season 2/The.Expanse.S02E01.mkv", True),
+        ("movies/Dune (2021)/Dune.2021.mkv", False),
+    ])
+    items = client.get("/api/library", headers={"x-api-token": "secret"}).json()["items"]
+    kinds = {i["name"]: i["kind"] for i in items}
+    assert kinds["The.Expanse.S02E03.mkv"] == "episode"
+    assert kinds["Dune.2021.mkv"] == "movie"
+
+
+def test_episodes_come_back_in_broadcast_order(client, tmp_path, monkeypatch):
+    _lib(monkeypatch, tmp_path, [
+        ("tv/Show/Season 1/Show.S01E10.mkv", False),
+        ("tv/Show/Season 1/Show.S01E02.mkv", False),
+        ("tv/Show/Season 2/Show.S02E01.mkv", False),
+    ])
+    items = client.get("/api/library", headers={"x-api-token": "secret"}).json()["items"]
+    eps = [(i["season"], i["episode"]) for i in items if i["kind"] == "episode"]
+    assert eps == sorted(eps), "filename order would put E10 before E02"
+    assert eps == [(1, 2), (1, 10), (2, 1)]
+
+
+def test_bulk_queues_a_whole_selection(client, tmp_path, monkeypatch):
+    made = _lib(monkeypatch, tmp_path, [
+        ("tv/Bulk/Season 1/Bulk.S01E01.mkv", False),
+        ("tv/Bulk/Season 1/Bulk.S01E02.mkv", False),
+        ("tv/Bulk/Season 1/Bulk.S01E03.mkv", True),     # already has a subtitle
+    ])
+    videos = [str(m["video"]) for m in made]
+
+    r = client.post("/translate/bulk", headers={"x-api-token": "secret"},
+                    json={"videos": videos, "provider": "ollama"})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["queued"] == 2 and d["skipped"] == 1     # the translated one is left alone
+
+
+def test_bulk_can_redo_translated_files(client, tmp_path, monkeypatch):
+    made = _lib(monkeypatch, tmp_path, [("tv/Redo/Season 1/Redo.S01E01.mkv", True)])
+    video = made[0]["video"]
+
+    d = client.post("/translate/bulk", headers={"x-api-token": "secret"},
+                    json={"videos": [str(video)], "provider": "ollama",
+                          "force": True}).json()
+    assert d["queued"] == 1
+    assert (video.parent / "Redo.S01E01.ar.srt.bak").is_file()
+
+
+def test_bulk_rejects_an_empty_or_absurd_request(client):
+    assert client.post("/translate/bulk", headers={"x-api-token": "secret"},
+                       json={"videos": []}).status_code == 400
+    assert client.post("/translate/bulk", headers={"x-api-token": "secret"},
+                       json={"videos": [f"/m/{n}.mkv" for n in range(2001)]}
+                       ).status_code == 400
+
+
+def test_bulk_counts_files_that_are_gone(client, tmp_path, monkeypatch):
+    d = client.post("/translate/bulk", headers={"x-api-token": "secret"},
+                    json={"videos": [str(tmp_path / "nope.mkv")]}).json()
+    assert d["missing"] == 1 and d["queued"] == 0

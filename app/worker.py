@@ -36,6 +36,49 @@ def series_key(video: Path) -> str:
     return parent.name or video.stem
 
 
+EPISODE_RE = re.compile(r"(?:^|[^a-z0-9])s(\d{1,3})[ ._-]?e(\d{1,4})", re.IGNORECASE)
+EPISODE_ALT_RE = re.compile(r"(?:^|[^a-z0-9])(\d{1,3})x(\d{1,4})(?:[^a-z0-9]|$)", re.IGNORECASE)
+
+
+MOVIE_ROOT_RE = re.compile(r"movie|film", re.IGNORECASE)
+TV_ROOT_RE = re.compile("(^|[^a-z])(tv|show|serie|anime)", re.IGNORECASE)
+
+
+def media_kind(video: Path, roots: list[str] | None = None) -> str:
+    """Episode or film.
+
+    Which library root the file sits under is the only reliable signal: plenty
+    of anime is numbered straight through with no season folder and no SxxEyy,
+    so filename patterns alone put whole series in the wrong tab. Those
+    patterns are the fallback for a layout the root names do not describe.
+    """
+    for root in roots or []:
+        try:
+            video.relative_to(root)
+        except ValueError:
+            continue
+        name = Path(root).name
+        if MOVIE_ROOT_RE.search(name):
+            return "movie"
+        if TV_ROOT_RE.search(name):
+            return "episode"
+
+    if SEASON_DIR_RE.match(video.parent.name.strip()):
+        return "episode"
+    if EPISODE_RE.search(video.name) or EPISODE_ALT_RE.search(video.name):
+        return "episode"
+    return "movie"
+
+
+def episode_number(video: Path) -> tuple[int, int]:
+    """Season and episode, for sorting. (0, 0) when it cannot be read."""
+    for pattern in (EPISODE_RE, EPISODE_ALT_RE):
+        m = pattern.search(video.name)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    return 0, 0
+
+
 def display_title(video: Path) -> str:
     """A human title for the prompt, with release-group noise trimmed off."""
     key = series_key(video)
