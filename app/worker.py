@@ -273,6 +273,12 @@ class Worker(threading.Thread):
     def run(self) -> None:
         log.info("%s started%s", self.name, " (rush lane)" if self.priority_only else "")
         while not self._stop.is_set():
+            # Claiming work we cannot start would only mark a job running and
+            # immediately put it back - and with every backend disabled that
+            # becomes a hot loop.
+            if self.pipeline.pool and not self.pipeline.pool.available():
+                self._stop.wait(5)
+                continue
             job = self.store.claim_next(priority_only=self.priority_only)
             if not job:
                 self._stop.wait(3)

@@ -40,6 +40,15 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at  REAL
 );
 
+CREATE TABLE IF NOT EXISTS backends (
+    name       TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL,
+    url        TEXT NOT NULL,
+    model      TEXT DEFAULT '',
+    enabled    INTEGER DEFAULT 1,
+    created_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS glossaries (
     key        TEXT PRIMARY KEY,
     payload    TEXT NOT NULL,
@@ -235,6 +244,36 @@ class Store:
             row["bz_kind"], row["bz_series_id"], row["bz_item_id"],
             provider, priority,
         )
+
+    # -- backends ---------------------------------------------------------
+    # Managed from the UI, so they have to outlive a restart. LLM_ENDPOINTS
+    # only seeds this the first time; after that the database is the truth.
+    def backends(self) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT name,kind,url,model,enabled FROM backends ORDER BY created_at"
+            ).fetchall()
+        return [dict(r) | {"enabled": bool(r["enabled"])} for r in rows]
+    def put_backend(self, name: str, kind: str, url: str, model: str,
+                    enabled: bool = True) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO backends (name,kind,url,model,enabled,created_at) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
+                "kind=excluded.kind, url=excluded.url, model=excluded.model, "
+                "enabled=excluded.enabled",
+                (name, kind, url, model, int(enabled), time.time()),
+            )
+            self._db.commit()
+    def set_backend_enabled(self, name: str, enabled: bool) -> None:
+        with self._lock:
+            self._db.execute("UPDATE backends SET enabled=? WHERE name=?",
+                             (int(enabled), name))
+            self._db.commit()
+    def drop_backend(self, name: str) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM backends WHERE name=?", (name,))
+            self._db.commit()
 
     # -- glossaries -------------------------------------------------------
 

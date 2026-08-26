@@ -408,3 +408,79 @@ def test_library_offers_both_rush_buttons(client):
     page = client.get("/library?token=secret").text
     assert "local now" in page and "Claude now" in page
     assert "'ollama'" in page and "'anthropic'" in page
+
+
+# -- backend management ----------------------------------------------------
+# The second GPU lives in a gaming PC, so it has to be possible to pull it out
+# of rotation without editing .env and redeploying.
+
+@pytest.fixture
+def clean_pool():
+    from app import main as m
+    before = list(m.state["pool"].endpoints)
+    m.state["pool"].endpoints.clear()
+    yield m.state["pool"]
+    m.state["pool"].endpoints[:] = before
+
+
+def test_a_backend_can_be_added_and_persists(client, clean_pool):
+    from app import main as m
+    r = client.post("/api/backends", headers={"x-api-token": "secret"},
+                    json={"kind": "ollama", "url": "http://192.168.1.7:11434",
+                          "model": "command-r7b-arabic"})
+    assert r.status_code == 200, r.text
+    assert r.json()["added"] == "ollama@192.168.1.7:11434"
+    # written through to the database, so a restart keeps it
+    assert any(b["url"] == "http://192.168.1.7:11434" for b in m.state["store"].backends())
+
+
+def test_adding_the_same_backend_twice_is_refused(client, clean_pool):
+    body = {"kind": "ollama", "url": "http://dup:11434", "model": "m"}
+    assert client.post("/api/backends", headers={"x-api-token": "secret"},
+                       json=body).status_code == 200
+    assert client.post("/api/backends", headers={"x-api-token": "secret"},
+                       json=body).status_code == 409
+
+
+def test_a_bad_backend_is_rejected(client, clean_pool):
+    for body in ({"kind": "ollama", "url": ""}, {"kind": "hal9000", "url": "http://x:1"}):
+        r = client.post("/api/backends", headers={"x-api-token": "secret"}, json=body)
+        assert r.status_code == 400, body
+
+
+def test_disabling_stops_new_work_without_losing_the_backend(client, clean_pool):
+    from app import main as m
+    client.post("/api/backends", headers={"x-api-token": "secret"},
+                json={"kind": "ollama", "url": "http://gaming:11434", "model": "m"})
+    name = "ollama@gaming:11434"
+
+    r = client.patch(f"/api/backends/{name}?enabled=false", headers={"x-api-token": "secret"})
+    assert r.status_code == 200 and r.json()["enabled"] is False
+    assert m.state["pool"].acquire() is None          # nothing left to lease
+    assert m.state["pool"].find(name) is not None     # but still configured
+    assert m.state["store"].backends()[-1]["enabled"] is False
+
+    client.patch(f"/api/backends/{name}?enabled=true", headers={"x-api-token": "secret"})
+    leased = m.state["pool"].acquire()
+    assert leased is not None and leased.name == name
+    m.state["pool"].release(leased)
+
+
+def test_a_busy_backend_cannot_be_removed(client, clean_pool):
+    from app import main as m
+    client.post("/api/backends", headers={"x-api-token": "secret"},
+                json={"kind": "ollama", "url": "http://busy:11434", "model": "m"})
+    leased = m.state["pool"].acquire()
+
+    r = client.delete(f"/api/backends/{leased.name}", headers={"x-api-token": "secret"})
+    assert r.status_code == 409 and "Disable it instead" in r.json()["detail"]
+
+    m.state["pool"].release(leased)
+    assert client.delete(f"/api/backends/{leased.name}",
+                         headers={"x-api-token": "secret"}).status_code == 200
+
+
+def test_the_backends_page_requires_auth_and_renders(client):
+    assert client.get("/backends", follow_redirects=False).status_code == 303
+    page = client.get("/backends?token=secret")
+    assert page.status_code == 200 and "add backend" in page.text

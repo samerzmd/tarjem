@@ -35,8 +35,10 @@ async def lifespan(app: FastAPI):
 
     # One worker per backend by default: routing alone buys nothing, since a
     # single worker sends one batch at a time whichever machine answers it.
-    pool = Pool(parse_endpoints(settings.llm_endpoints))
-    count = max(settings.workers, len(pool.endpoints)) if pool else max(1, settings.workers)
+    pool = Pool(_seed_backends(store))
+    # Headroom for a backend added from the UI later: a worker with nothing
+    # free simply waits, so a spare costs nothing.
+    count = max(settings.workers, len(pool.endpoints) + 1) if pool else max(1, settings.workers)
     if pool:
         log.info("%d backend(s) in the pool: %s", len(pool.endpoints),
                  ", ".join(e.name for e in pool.endpoints))
@@ -143,6 +145,34 @@ def logout() -> Response:
 
 def store() -> Store:
     return state["store"]
+
+
+def pool() -> Pool:
+    return state["pool"]
+
+
+def _seed_backends(db: Store) -> list:
+    """Backends live in the database so the UI can change them.
+
+    LLM_ENDPOINTS only seeds an empty table - after that the database wins,
+    otherwise a redeploy would silently undo every change made in the UI.
+    """
+    stored = db.backends()
+    if not stored and settings.llm_endpoints:
+        for endpoint in parse_endpoints(settings.llm_endpoints):
+            db.put_backend(endpoint.name, endpoint.kind, endpoint.url, endpoint.model)
+            log.info("seeded backend %s from LLM_ENDPOINTS", endpoint.name)
+        stored = db.backends()
+
+    out = []
+    for row in stored:
+        (endpoint,) = parse_endpoints(f"{row['kind']}@{row['url']}#{row['model']}") or (None,)
+        if endpoint is None:
+            log.warning("stored backend %s is malformed, skipping", row["name"])
+            continue
+        endpoint.name, endpoint.enabled = row["name"], row["enabled"]
+        out.append(endpoint)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -409,6 +439,66 @@ def retry(job_id: int) -> dict:
     return {"requeued": True, "job": new_id}
 
 
+class BackendRequest(BaseModel):
+    kind: str = "ollama"
+    url: str
+    model: str = ""
+
+
+@app.get("/api/backends", dependencies=[Depends(auth)])
+def api_backends() -> dict:
+    return {"backends": pool().status()}
+
+
+@app.post("/api/backends", dependencies=[Depends(auth)])
+def add_backend(req: BackendRequest) -> dict:
+    spec = f"{req.kind.strip().lower()}@{req.url.strip()}#{req.model.strip()}"
+    parsed = parse_endpoints(spec)
+    if not parsed:
+        raise HTTPException(status_code=400,
+                            detail="need a kind and a url, e.g. ollama@http://host:11434")
+    endpoint = parsed[0]
+    if endpoint.kind not in ("ollama", "local", "openai", "openai-compatible",
+                             "lmstudio", "anthropic"):
+        raise HTTPException(status_code=400, detail=f"unknown kind '{endpoint.kind}'")
+    if pool().find(endpoint.name):
+        raise HTTPException(status_code=409, detail=f"{endpoint.name} is already configured")
+
+    store().put_backend(endpoint.name, endpoint.kind, endpoint.url, endpoint.model)
+    pool().add(endpoint)
+    log.info("added backend %s", endpoint.name)
+    return {"added": endpoint.name, "backends": pool().status()}
+
+
+@app.patch("/api/backends/{name}", dependencies=[Depends(auth)])
+def toggle_backend(name: str, enabled: bool = Query(...)) -> dict:
+    """Turn a backend off without losing its settings.
+
+    A job already running on it is left to finish - stopping mid-file would
+    throw away everything translated so far.
+    """
+    if not pool().set_enabled(name, enabled):
+        raise HTTPException(status_code=404, detail=f"no backend named {name}")
+    store().set_backend_enabled(name, enabled)
+    return {"name": name, "enabled": enabled, "backends": pool().status()}
+
+
+@app.delete("/api/backends/{name}", dependencies=[Depends(auth)])
+def delete_backend(name: str) -> dict:
+    endpoint = pool().find(name)
+    if endpoint is None:
+        raise HTTPException(status_code=404, detail=f"no backend named {name}")
+    if endpoint.lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="that backend is mid-job. Disable it instead; it will stop "
+                   "taking new work and you can remove it once it is idle.",
+        )
+    pool().remove(name)
+    store().drop_backend(name)
+    return {"removed": name, "backends": pool().status()}
+
+
 @app.get("/glossaries", dependencies=[Depends(auth)])
 def glossaries() -> dict:
     return {"glossaries": store().glossaries()}
@@ -469,7 +559,7 @@ PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
  .hint{{color:#7b8494;font-size:12px;margin-top:6px}}
  #msg{{margin-left:10px;font-size:12px}}
 </style></head><body>
-<h1>tarjem <a href="/library" style="font-size:12px">library &rarr;</a> {logout}</h1>
+<h1>tarjem <a href="/library" style="font-size:12px">library</a> <a href="/backends" style="font-size:12px">backends</a> {logout}</h1>
 <div class="sub">{provider} &middot; {model} &middot; {target}/{register} &middot; bazarr {bazarr}</div>
 <div style="margin-bottom:16px">{pills}</div>
 
@@ -636,6 +726,126 @@ def library_page(request: Request):
     if not auth_mod.authenticated(settings, request):
         return RedirectResponse("/login", status_code=303)
     return LIBRARY_PAGE
+
+
+
+BACKENDS_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>tarjem backends</title><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:#14161a;
+      color:#d8dee9;margin:0;padding:24px}
+ h1{font-size:18px;margin:0 0 4px} a{color:#88c0d0}
+ .sub{color:#7b8494;margin-bottom:20px}
+ table{border-collapse:collapse;width:100%;max-width:1000px;font-size:13px}
+ th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #262a31}
+ th{color:#7b8494;font-weight:500}
+ .on{color:#a3be8c} .off{color:#7b8494} .bad{color:#bf616a} .busy{color:#ebcb8b}
+ button{font:inherit;font-size:12px;background:#3b4252;color:#e5e9f0;border:1px solid #4c566a;
+        border-radius:4px;padding:4px 10px;cursor:pointer;margin-right:4px}
+ button:hover{background:#4c566a} button:disabled{opacity:.45;cursor:default}
+ button.danger{border-color:#bf616a}
+ input,select{font:inherit;font-size:13px;background:#1b1f26;color:#d8dee9;
+   border:1px solid #3b4252;border-radius:4px;padding:6px 8px;margin-right:6px}
+ input.url{width:280px} input.model{width:210px}
+ .add{margin-top:26px;padding:14px;background:#1b1f26;border:1px solid #262a31;border-radius:6px;
+      max-width:1000px}
+ .hint{color:#7b8494;font-size:12px;margin-top:8px}
+ #msg{margin-left:10px;font-size:12px}
+</style></head><body>
+<h1>backends <a href="/" style="font-size:12px">&larr; jobs</a>
+  <a href="/library" style="font-size:12px">library</a></h1>
+<div class="sub">Machines that do the translating. Turn one off to get its GPU
+  back - a job already running on it finishes first.</div>
+
+<table><thead><tr><th>backend</th><th>model</th><th>state</th><th></th></tr></thead>
+<tbody id="rows"><tr><td colspan="4">loading&hellip;</td></tr></tbody></table>
+
+<div class="add">
+  <select id="kind">
+    <option value="ollama">ollama</option>
+    <option value="openai">openai-compatible (LM Studio, vLLM, ...)</option>
+    <option value="anthropic">anthropic</option>
+  </select>
+  <input class="url" id="url" placeholder="http://192.168.1.50:11434" spellcheck="false">
+  <input class="model" id="model" placeholder="command-r7b-arabic" spellcheck="false">
+  <button onclick="add()">add backend</button>
+  <span id="msg"></span>
+  <div class="hint">An ollama backend uses the native API, which enforces the
+    output schema. Anything else goes through the OpenAI-compatible path.</div>
+</div>
+
+<script>
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
+const hdrs = TOKEN ? {"x-api-token": TOKEN, "Content-Type": "application/json"}
+                   : {"Content-Type": "application/json"};
+function say(t, ok) {
+  const m = document.getElementById("msg");
+  m.textContent = t; m.style.color = ok ? "#a3be8c" : "#bf616a";
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]); }
+async function api(method, path, body) {
+  const r = await fetch(path, {method, headers: hdrs,
+                               body: body ? JSON.stringify(body) : null});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.detail || r.status);
+  return d;
+}
+function render(list) {
+  document.getElementById("rows").innerHTML = list.map(b => {
+    let state = b.enabled ? '<span class="on">enabled</span>'
+                          : '<span class="off">disabled</span>';
+    if (b.enabled && !b.healthy)
+      state += ` <span class="bad">unreachable, retrying in ${b.down_for_s}s</span>`;
+    if (b.busy) state += ' <span class="busy">&middot; translating</span>';
+    return `<tr>
+      <td>${esc(b.name)}<br><span class="off">${esc(b.kind)}</span></td>
+      <td>${esc(b.model || "(default)")}</td>
+      <td>${state}</td>
+      <td>
+        <button onclick="toggle('${esc(b.name)}',${!b.enabled})">
+          ${b.enabled ? "disable" : "enable"}</button>
+        <button class="danger" ${b.busy ? "disabled" : ""}
+          onclick="remove('${esc(b.name)}')">remove</button>
+      </td></tr>`;
+  }).join("") || '<tr><td colspan="4">no backends - tarjem will use LLM_PROVIDER instead</td></tr>';
+}
+async function load() {
+  try { render((await api("GET", "/api/backends")).backends); }
+  catch (e) { say("not authorised - open this page with ?token=...", false); }
+}
+async function toggle(name, enabled) {
+  try { render((await api("PATCH", `/api/backends/${encodeURIComponent(name)}?enabled=${enabled}`)).backends);
+        say(`${name} ${enabled ? "enabled" : "disabled"}`, true); }
+  catch (e) { say(String(e.message), false); }
+}
+async function remove(name) {
+  if (!confirm(`Remove ${name}? Its settings are lost; disable instead to keep them.`)) return;
+  try { render((await api("DELETE", `/api/backends/${encodeURIComponent(name)}`)).backends);
+        say(`${name} removed`, true); }
+  catch (e) { say(String(e.message), false); }
+}
+async function add() {
+  const url = document.getElementById("url").value.trim();
+  if (!url) return say("a url is required", false);
+  try {
+    const d = await api("POST", "/api/backends", {
+      kind: document.getElementById("kind").value,
+      url, model: document.getElementById("model").value.trim()});
+    render(d.backends); say(`added ${d.added}`, true);
+    document.getElementById("url").value = "";
+  } catch (e) { say(String(e.message), false); }
+}
+load();
+setInterval(load, 10000);
+</script></body></html>"""
+
+
+@app.get("/backends", response_class=HTMLResponse)
+def backends_page(request: Request):
+    if not auth_mod.authenticated(settings, request):
+        return RedirectResponse("/login", status_code=303)
+    return BACKENDS_PAGE
 
 
 @app.get("/", response_class=HTMLResponse)

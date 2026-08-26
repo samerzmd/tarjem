@@ -33,12 +33,18 @@ class Endpoint:
     url: str
     model: str = ""
     name: str = ""
+    # Turned off from the UI rather than removed - a gaming PC gets its GPU
+    # back without losing the backend's configuration.
+    enabled: bool = True
     failures: int = 0
     down_until: float = 0.0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def healthy(self) -> bool:
         return time.monotonic() >= self.down_until
+
+    def usable(self) -> bool:
+        return self.enabled and self.healthy()
 
     def mark_down(self, why: str) -> None:
         self.failures += 1
@@ -85,13 +91,19 @@ class Pool:
     def __bool__(self) -> bool:
         return bool(self.endpoints)
 
-    def acquire(self) -> Endpoint | None:
-        """Take an idle, healthy backend. None if every one is busy or down."""
+    def available(self) -> bool:
+        """Is any backend usable and idle? Checked before claiming a job, so a
+        worker does not claim work it would only have to put back."""
         with self._lock:
-            healthy = [e for e in self.endpoints if e.healthy()]
-            if not healthy:
+            return any(e.usable() and not e.lock.locked() for e in self.endpoints)
+
+    def acquire(self) -> Endpoint | None:
+        """Take an idle, usable backend. None if every one is busy or off."""
+        with self._lock:
+            usable = [e for e in self.endpoints if e.usable()]
+            if not usable:
                 return None
-            for endpoint in healthy:
+            for endpoint in usable:
                 if endpoint.lock.acquire(blocking=False):
                     return endpoint
         return None
@@ -104,12 +116,42 @@ class Pool:
         except RuntimeError:      # already released
             pass
 
+    def find(self, name: str) -> Endpoint | None:
+        return next((e for e in self.endpoints if e.name == name), None)
+
+    def add(self, endpoint: Endpoint) -> None:
+        with self._lock:
+            if not self.find(endpoint.name):
+                self.endpoints.append(endpoint)
+
+    def remove(self, name: str) -> bool:
+        with self._lock:
+            endpoint = self.find(name)
+            if endpoint is None:
+                return False
+            self.endpoints.remove(endpoint)
+            return True
+
+    def set_enabled(self, name: str, enabled: bool) -> bool:
+        """Turning one off stops new work reaching it. A job already running on
+        it finishes rather than being thrown away."""
+        endpoint = self.find(name)
+        if endpoint is None:
+            return False
+        endpoint.enabled = enabled
+        if enabled:
+            endpoint.mark_up()
+        log.info("backend %s %s", name, "enabled" if enabled else "disabled")
+        return True
+
     def status(self) -> list[dict]:
         return [
             {
                 "name": e.name,
                 "kind": e.kind,
+                "url": e.url,
                 "model": e.model,
+                "enabled": e.enabled,
                 "busy": e.lock.locked(),
                 "healthy": e.healthy(),
                 "failures": e.failures,
