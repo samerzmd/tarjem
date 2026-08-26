@@ -73,8 +73,12 @@ class Settings:
 
     # --- model -----------------------------------------------------------
     provider: str = _str("LLM_PROVIDER", "anthropic")
-    model: str = _str("LLM_MODEL", "claude-opus-5")
+    model: str = _str("LLM_MODEL", "claude-sonnet-5")
     effort: str = _str("LLM_EFFORT", "low")
+    # "adaptive" or "disabled". Measured on real episodes, output tokens are
+    # ~73% of the bill and thinking roughly doubles them - and translation is
+    # not a reasoning task. Dropped automatically on models that reject it.
+    thinking: str = _str("LLM_THINKING", "disabled")
     batch_size: int = _int("BATCH_SIZE", 40)
     context_cues: int = _int("CONTEXT_CUES", 8)
     max_retries: int = _int("MAX_RETRIES", 3)

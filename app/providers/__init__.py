@@ -8,7 +8,10 @@ def build_provider(cfg: Settings) -> Provider:
     if cfg.provider == "anthropic":
         from .anthropic_provider import AnthropicProvider
 
-        return AnthropicProvider(api_key=cfg.anthropic_api_key, model=cfg.model, effort=cfg.effort)
+        return AnthropicProvider(
+            api_key=cfg.anthropic_api_key, model=cfg.model,
+            effort=cfg.effort, thinking=cfg.thinking,
+        )
     if cfg.provider in ("ollama", "local"):
         from .ollama_provider import OllamaProvider
 

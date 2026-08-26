@@ -22,13 +22,32 @@ log = logging.getLogger(__name__)
 class AnthropicProvider(Provider):
     name = "anthropic"
 
-    def __init__(self, api_key: str = "", model: str = "claude-opus-5", effort: str = "low"):
+    def __init__(self, api_key: str = "", model: str = "claude-opus-5",
+                 effort: str = "low", thinking: str = "adaptive"):
         super().__init__()
         # An empty key is not the same as no credentials: the SDK also resolves
         # ANTHROPIC_AUTH_TOKEN and `ant auth login` profiles.
         self.client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
         self.model = model
         self.effort = effort
+        self.thinking = thinking
+        # Not every model takes these. Older ones reject output_config.effort
+        # outright; some reject an explicit thinking setting.
+        self._send_effort = True
+        self._send_thinking = thinking == "disabled"
+
+    def _degrade(self, detail: str) -> bool:
+        """Drop one unsupported request feature. False when nothing is left."""
+        low = detail.lower()
+        if self._send_effort and ("effort" in low or "output_config" in low):
+            log.info("%s does not take output_config.effort; dropping it", self.model)
+            self._send_effort = False
+            return True
+        if self._send_thinking and "thinking" in low:
+            log.info("%s does not take an explicit thinking setting; dropping it", self.model)
+            self._send_thinking = False
+            return True
+        return False
 
     def structured(
         self,
@@ -44,25 +63,41 @@ class AnthropicProvider(Provider):
                 entry["cache_control"] = {"type": "ephemeral"}
             blocks.append(entry)
 
-        try:
-            response = self.client.messages.parse(
-                model=self.model,
-                max_tokens=max_tokens,
-                system=blocks,
-                output_config={"effort": self.effort},
-                messages=[{"role": "user", "content": user}],
-                output_format=schema_model,
-            )
-        except anthropic.RateLimitError as exc:
-            retry_after = _retry_after(exc)
-            raise ProviderError(f"rate limited: {exc}", retryable=True, retry_after=retry_after) from exc
-        except anthropic.APIConnectionError as exc:
-            raise ProviderError(f"connection error: {exc}", retryable=True) from exc
-        except anthropic.APIStatusError as exc:
-            raise ProviderError(
-                f"api error {exc.status_code}: {exc.message}",
-                retryable=exc.status_code >= 500 or exc.status_code == 429,
-            ) from exc
+        # Two request features are model-dependent, so they are attempted and
+        # dropped on refusal rather than gated on a hardcoded model list that
+        # would rot as models are released.
+        for _ in range(3):
+            kwargs: dict = {}
+            if self._send_effort:
+                kwargs["output_config"] = {"effort": self.effort}
+            if self._send_thinking and self.thinking == "disabled":
+                kwargs["thinking"] = {"type": "disabled"}
+
+            try:
+                response = self.client.messages.parse(
+                    model=self.model,
+                    max_tokens=max_tokens,
+                    system=blocks,
+                    messages=[{"role": "user", "content": user}],
+                    output_format=schema_model,
+                    **kwargs,
+                )
+                break
+            except anthropic.RateLimitError as exc:
+                raise ProviderError(f"rate limited: {exc}", retryable=True,
+                                    retry_after=_retry_after(exc)) from exc
+            except anthropic.APIConnectionError as exc:
+                raise ProviderError(f"connection error: {exc}", retryable=True) from exc
+            except anthropic.BadRequestError as exc:
+                if not self._degrade(str(exc.message)):
+                    raise ProviderError(f"api error 400: {exc.message}", retryable=False) from exc
+            except anthropic.APIStatusError as exc:
+                raise ProviderError(
+                    f"api error {exc.status_code}: {exc.message}",
+                    retryable=exc.status_code >= 500 or exc.status_code == 429,
+                ) from exc
+        else:
+            raise ProviderError("no accepted request shape for this model", retryable=False)
 
         self._record(response)
 

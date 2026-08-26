@@ -186,11 +186,25 @@ In order, first hit wins:
 Every job records its real token usage — `GET /jobs/{id}` returns `usage`,
 including how much was served from cache. Trust that over any estimate here.
 
-**Claude.** Roughly a dollar or so per feature film on `claude-opus-5` and
-noticeably less on `claude-sonnet-5`, with a 22-minute episode around a third of
-a film. A film takes a few minutes. `LLM_EFFORT=low` is the default because
-translation isn't a reasoning task, and the rules plus glossary sit in a cached
-prompt prefix, so most per-batch input bills at the cache-read rate.
+**Claude.** Measured on two real ~350-cue episodes, about 32k input and 22k
+output tokens each:
+
+| `LLM_MODEL` | per episode | per 100 |
+|---|---|---|
+| `claude-opus-5` | $0.74 | $74 |
+| `claude-sonnet-5` (default) | $0.44 | $44 |
+| `claude-haiku-4-5` | $0.15 | $15 |
+
+**Output tokens are ~73% of the bill**, so the output price is the lever that
+matters. Two settings act on it directly:
+
+- `LLM_THINKING=disabled` (the default) — translation is not a reasoning task,
+  and thinking tokens are billed as output. It is dropped automatically on
+  models that reject an explicit thinking setting.
+- `LLM_EFFORT=low` (the default) — where thinking is on, keep it shallow.
+
+The rules and glossary sit in a cached prompt prefix, so most per-batch input
+bills at the cache-read rate.
 
 **Self-hosted.** Free, and much slower than people expect.
 
