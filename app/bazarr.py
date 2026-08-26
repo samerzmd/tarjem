@@ -114,7 +114,7 @@ class BazarrClient:
         Only jobs that came from Bazarr carry its ids. Anything queued from the
         library page has none, so the subtitle was written and Bazarr never
         told - it would not appear until its own next disk scan. Series are
-        matched by folder prefix, films by exact path.
+        matched by folder prefix, films by exact path then by folder.
         """
         if not (self.enabled and self.cfg.notify_bazarr):
             return None
@@ -124,6 +124,15 @@ class BazarrClient:
         radarr_id = index["movies"].get(video)
         if radarr_id:
             return ("movie", 0, radarr_id)
+
+        # An upgrade replaces the file but keeps the folder, and Bazarr still
+        # has the old name until it rescans. Radarr gives a movie a folder of
+        # its own, so the folder identifies it just as well.
+        folder = video.rsplit("/", 1)[0]
+        if folder != video:
+            for path, movie_id in index["movies"].items():
+                if path.rsplit("/", 1)[0] == folder:
+                    return ("movie", 0, movie_id)
 
         # Longest prefix wins: a series inside another series' folder should
         # match the inner one.

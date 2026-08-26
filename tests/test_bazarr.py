@@ -57,6 +57,18 @@ def test_a_film_is_matched_on_its_exact_path():
     assert client().locate("/movies/Dune (2021)/Dune.2021.mkv") == ("movie", 0, 7)
 
 
+def test_a_replaced_film_still_matches_on_its_folder():
+    """An upgrade renames the file; Bazarr keeps the old name until it
+    rescans, which is exactly the rescan we are trying to ask for."""
+    found = client().locate("/movies/Dune (2021)/Dune.2021.2160p.PROPER.mkv")
+    assert found == ("movie", 0, 7)
+
+
+def test_a_film_in_an_unknown_folder_does_not_match():
+    found = client().locate("/movies/Dune Part Two (2024)/Dune.2024.mkv")
+    assert found is None
+
+
 def test_the_innermost_series_wins():
     """A nested library would otherwise resolve to whichever came back first."""
     nested = SERIES + [{"sonarrSeriesId": 99, "path": "/tv"}]
