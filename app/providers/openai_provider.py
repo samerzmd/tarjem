@@ -101,19 +101,27 @@ class OpenAIProvider(Provider):
         raise ProviderError("server rejected every request shape we know", retryable=False)
 
     def _degrade(self, detail: str) -> bool:
-        """Drop one unsupported feature. Returns False when there's nothing left."""
+        """Drop one unsupported feature. Returns False when there's nothing left.
+
+        Deliberately not keyed on the wording of the error. Servers describe the
+        same failure in wildly different terms - LM Studio answers a schema its
+        grammar engine cannot satisfy with "the model produced output that does
+        not match the expected peg-native format", which mentions neither the
+        schema nor response_format. Matching on keywords meant a 400 that was
+        obviously about structured output sailed straight past the fallback.
+        """
         low = detail.lower()
         if "max_completion_tokens" in low and self._token_param == "max_tokens":
             log.info("server wants max_completion_tokens; switching")
             self._token_param = "max_completion_tokens"
             return True
-        if self._json_mode == "json_schema" and ("response_format" in low or "schema" in low
-                                                 or "json_schema" in low):
-            log.warning("server rejected json_schema; falling back to json_object")
+        if self._json_mode == "json_schema":
+            log.warning("json_schema rejected (%s); falling back to json_object",
+                        detail[:120].replace("\n", " "))
             self._json_mode = "json_object"
             return True
         if self._json_mode == "json_object":
-            log.warning("server rejected json_object; relying on prompt instructions alone")
+            log.warning("json_object rejected too; relying on prompt instructions alone")
             self._json_mode = "none"
             return True
         return False
@@ -139,7 +147,7 @@ class OpenAIProvider(Provider):
             raise ProviderError("empty response", retryable=True)
 
         try:
-            return schema_model.model_validate(json.loads(text))
+            return schema_model.model_validate(_coerce(json.loads(text)))
         except (json.JSONDecodeError, ValueError) as exc:
             raise ProviderError(
                 f"unparseable structured output: {exc} | {text[:200]}", retryable=True
@@ -147,6 +155,45 @@ class OpenAIProvider(Provider):
 
     def close(self) -> None:
         self.client.close()
+
+
+ALIASES = ("ar", "arabic", "translation", "translated", "text", "value")
+
+
+def _coerce(data):
+    """Nudge a near-miss into the shape the schema wants.
+
+    Only needed where the server could not enforce a schema. Left to itself a
+    small model will return a bare list, or echo the input's field names back -
+    the translation is right there and correct, and rejecting the batch over the
+    key it arrived under would be a waste.
+    """
+    if isinstance(data, list):
+        data = {"cues": data}
+    if not isinstance(data, dict):
+        return data
+
+    cues = data.get("cues")
+    if cues is None:
+        for key in ("items", "results", "translations", "subtitles", "lines"):
+            if isinstance(data.get(key), list):
+                cues, data = data[key], {**data, "cues": data[key]}
+                break
+    if not isinstance(cues, list):
+        return data
+
+    fixed = []
+    for entry in cues:
+        if not isinstance(entry, dict):
+            continue
+        if "ar" in entry and isinstance(entry["ar"], str):
+            fixed.append({"id": entry.get("id"), "ar": entry["ar"]})
+            continue
+        for key in ALIASES:
+            if isinstance(entry.get(key), str):
+                fixed.append({"id": entry.get("id"), "ar": entry[key]})
+                break
+    return {**data, "cues": fixed}
 
 
 def _json_payload(content: str) -> str:
@@ -160,12 +207,17 @@ def _json_payload(content: str) -> str:
     fenced = FENCE_RE.search(text)
     if fenced:
         text = fenced.group(1).strip()
-    if text.startswith("{"):
+    if text[:1] in ("{", "["):
         return text
-    start, end = text.find("{"), text.rfind("}")
-    if 0 <= start < end:
-        return text[start:end + 1]
-    return text
+    # A model may answer with either an object or a bare array, so take
+    # whichever opens first rather than assuming an object and slicing an
+    # array down to its first element.
+    starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
+    if not starts:
+        return text
+    start = min(starts)
+    end = text.rfind("}" if text[start] == "{" else "]")
+    return text[start:end + 1] if end > start else text
 
 
 def _strict_schema(model_cls) -> dict:

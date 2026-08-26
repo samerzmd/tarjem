@@ -40,9 +40,12 @@ class StubProvider(Provider):
             raise ProviderError("transient", retryable=True)
 
         import json
-        import re
 
-        payload = json.loads(re.search(r"\[\s*\{.*\}\s*\]", user, re.S).group(0))
+        # The prompt now shows the model an example of the output shape before
+        # the cues, so the payload is the *last* array in it.
+        start, end = user.rfind("["), user.rfind("]")
+        assert 0 <= start < end, f"no payload found in prompt:\n{user[-400:]}"
+        payload = json.loads(user[start:end + 1])
         return BatchTranslation.model_validate({
             "cues": [
                 {"id": row["id"], "ar": f"[AR] {row['text']}"}

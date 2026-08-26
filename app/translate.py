@@ -174,9 +174,13 @@ Sample:
 BATCH_PROMPT = """\
 {title_block}{context_block}Translate every cue below into Arabic.
 
-Return one entry per cue, carrying the same `id`. `ms` is how long the cue is on \
-screen - use it to judge how much text will fit. Do not translate anything from \
-the context section above.
+`ms` is how long the cue is on screen - use it to judge how much text will fit. \
+Do not translate anything from the context section above.
+
+Answer with JSON in exactly this shape, one entry per cue, carrying the same \
+`id`. Do not echo `ms` or `text`, and do not wrap it in anything else:
+
+{{"cues": [{{"id": <the id>, "ar": "<the Arabic>"}}, ...]}}
 
 {payload}
 """

@@ -157,3 +157,54 @@ def test_usage_is_accumulated():
     call(p)
     assert p.usage.calls == 2
     assert p.usage.input_tokens == 200 and p.usage.output_tokens == 100
+
+
+# -- shape coercion --------------------------------------------------------
+# Only needed where the server cannot enforce a schema. LM Studio, for one,
+# accepts json_schema or text and rejects json_object outright - so a model
+# that fails constrained decoding ends up answering free-form.
+
+def test_a_bare_list_is_accepted():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=reply(json.dumps(
+            [{"id": 0, "ar": "مرحبا"}, {"id": 1, "ar": "وداعا"}])))
+
+    assert len(call(provider(handler)).cues) == 2
+
+
+def test_the_input_field_names_echoed_back_are_remapped():
+    """A small model often replies with the shape it was given."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=reply(json.dumps(
+            {"cues": [{"id": 0, "ms": 2100, "text": "مرحبا"}]})))
+
+    out = call(provider(handler))
+    assert out.cues[0].ar == "مرحبا" and out.cues[0].id == 0
+
+
+def test_an_alternative_container_key_is_found():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=reply(json.dumps(
+            {"translations": [{"id": 3, "arabic": "نعم"}]})))
+
+    out = call(provider(handler))
+    assert out.cues[0].id == 3 and out.cues[0].ar == "نعم"
+
+
+def test_json_schema_falls_back_on_a_400_whatever_the_wording():
+    """LM Studio says 'does not match the expected peg-native format' - no
+    mention of schema or response_format, so keyword matching missed it."""
+    modes = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        modes.append((body.get("response_format") or {}).get("type", "none"))
+        if modes[-1] == "json_schema":
+            return httpx.Response(400, json={
+                "error": "Engine protocol predict stream returned an error: "
+                         "the model produced output that does not match the "
+                         "expected peg-native format"})
+        return httpx.Response(200, json=reply(json.dumps(CUES)))
+
+    assert len(call(provider(handler)).cues) == 2
+    assert modes[0] == "json_schema" and modes[1] == "json_object"
