@@ -33,9 +33,10 @@ async def lifespan(app: FastAPI):
     bazarr = BazarrClient(settings)
     workers = [Worker(settings, store, bazarr, name=f"worker-{i + 1}")
                for i in range(max(1, settings.workers))]
-    # A lane of its own for rush jobs. They run on whichever provider the
-    # request named - usually a cloud one - so they don't contend for the same
-    # hardware as the local model, and shouldn't wait behind it either.
+    # A lane of its own for anything picked by hand. Whatever provider it names,
+    # the point is that it starts now instead of behind a backlog the sweeper
+    # built. A local rush does share the GPU with the main worker, so the two
+    # interleave - still far better than waiting out the queue.
     workers.append(Worker(settings, store, bazarr, name="rush", priority_only=True))
     for worker in workers:
         worker.start()
@@ -461,10 +462,11 @@ PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <div class="rushbar">
   <input id="path" placeholder="/media/tv/Show/Season 1/Episode.mkv"
          value="" spellcheck="false">
-  <button onclick="rushPath()">Translate now on Claude</button>
+  <button onclick="rushPath('ollama')">Translate now (local)</button>
+  <button onclick="rushPath('anthropic')">Translate now (Claude)</button>
   <span id="msg"></span>
-  <div class="hint">Jumps the queue and runs on Claude in its own lane, so it does
-    not wait behind the local model.{keyhint}</div>
+  <div class="hint">Either one jumps the queue and runs in its own lane rather
+    than waiting behind the backlog.{keyhint}</div>
 </div>
 
 <table><tr><th>#</th><th>title</th><th>status</th><th>progress</th><th>source</th><th>result</th><th></th></tr>
@@ -487,21 +489,22 @@ async function post(url, body) {{
   if (!r.ok) throw new Error(d.detail || r.status);
   return d;
 }}
-async function rushPath() {{
+async function rushPath(provider) {{
   const v = document.getElementById("path").value.trim();
   if (!v) return say("paste a path first", false);
   say("queueing...", true);
   try {{
-    const d = await post("/translate", {{video: v, provider: "anthropic", rush: true, force: true}});
+    const d = await post("/translate",
+                         {{video: v, provider: provider, rush: true, force: true}});
     say(d.queued ? `queued as job ${{d.job}}` : d.reason, d.queued);
   }} catch (e) {{ say(String(e.message), false); }}
 }}
-async function rushJob(btn, id) {{
+async function rushJob(btn, id, provider) {{
   btn.disabled = true;
   say("queueing...", true);
   try {{
-    const d = await post(`/jobs/${{id}}/rush?provider=anthropic`);
-    say(`queued as job ${{d.job}} on Claude`, true);
+    const d = await post(`/jobs/${{id}}/rush?provider=${{provider}}`);
+    say(`queued as job ${{d.job}} on ${{provider}}`, true);
   }} catch (e) {{ btn.disabled = false; say(String(e.message), false); }}
 }}
 </script>
@@ -585,23 +588,25 @@ function render() {
                 :                '<span class="missing">none</span>';
     // Already translated is not a reason to refuse - it is a reason to warn.
     // force renames the existing file to .bak rather than deleting it.
-    const label = i.translated ? "redo" : "local";
     const dis = i.pending ? "disabled" : "";
+    const redo = i.translated ? " (redo)" : "";
     return `<tr><td>${esc(i.title)}</td>
       <td class="path">${esc(i.name)}</td><td>${state}</td>
-      <td><button ${dis} onclick="go(this,'${encodeURIComponent(i.video)}',false,${!!i.translated})">${label}</button>
-      <button class="claude" ${dis}
-        onclick="go(this,'${encodeURIComponent(i.video)}',true,${!!i.translated})">Claude</button></td></tr>`;
+      <td><button ${dis} title="run now on the local model, ahead of the queue"
+        onclick="go(this,'${encodeURIComponent(i.video)}','ollama',${!!i.translated})">local now${redo}</button>
+      <button class="claude" ${dis} title="run now on Claude, ahead of the queue"
+        onclick="go(this,'${encodeURIComponent(i.video)}','anthropic',${!!i.translated})">Claude now${redo}</button></td></tr>`;
   }).join("") || '<tr><td colspan="4">nothing matches</td></tr>';
 }
-async function go(btn, video, claude, translated) {
+async function go(btn, video, provider, translated) {
   const path = decodeURIComponent(video);
   if (translated && !confirm(
       "This already has a subtitle.\\n\\nRe-translate it? The existing file is " +
       "renamed to .bak, not deleted.")) return;
   btn.disabled = true; say("queueing...", true);
-  const body = {video: path, force: !!translated};
-  if (claude) { body.provider = "anthropic"; body.rush = true; }
+  // Clicking a specific item always means "now" - the queue exists for the
+  // sweeper and the bazarr webhook, not for something you picked by hand.
+  const body = {video: path, force: !!translated, provider: provider, rush: true};
   const r = await fetch("/translate", {method: "POST", headers: hdrs,
                                         body: JSON.stringify(body)});
   const d = await r.json().catch(() => ({}));
@@ -652,8 +657,11 @@ def dashboard(request: Request, status: str = ""):
         # Rushing something already queued or running would only duplicate it.
         action = ""
         if j["status"] in ("failed", "done", "skipped"):
-            action = (f'<button onclick="rushJob(this,{j["id"]})" '
-                      f'title="re-run on Claude, ahead of the queue">Claude</button>')
+            action = (
+                f'<button onclick="rushJob(this,{j["id"]},&quot;ollama&quot;)" '
+                f'title="re-run on the local model, ahead of the queue">local</button>'
+                f'<button onclick="rushJob(this,{j["id"]},&quot;anthropic&quot;)" '
+                f'title="re-run on Claude, ahead of the queue">Claude</button>')
         badge = ' <span class="pill">rush</span>' if j.get("priority") else ""
 
         rows.append(

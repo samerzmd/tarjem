@@ -211,10 +211,10 @@ def test_rush_endpoint_requeues_an_existing_job(client, tmp_path):
     s.anthropic_api_key = ""
 
 
-def test_dashboard_shows_the_rush_control(client):
+def test_dashboard_shows_both_rush_controls(client):
     page = client.get("/?token=secret").text
-    assert "Translate now on Claude" in page
-    assert "rushPath()" in page
+    assert "Translate now (local)" in page and "Translate now (Claude)" in page
+    assert "rushPath('ollama')" in page and "rushPath('anthropic')" in page
 
 
 # -- library: browse everything still missing Arabic ----------------------
@@ -363,3 +363,48 @@ def test_dashboard_can_filter_to_a_single_status(client):
 def test_jobs_api_puts_the_running_job_first(client):
     d = client.get("/jobs?limit=50", headers={"x-api-token": "secret"}).json()
     assert d["jobs"][0]["status"] == "running"
+
+
+def test_a_local_job_can_rush_too(client, tmp_path):
+    """The rush lane is about jumping the queue, not about which provider."""
+    video = tmp_path / "Local.Rush.2024.mkv"
+    video.write_bytes(b"x")
+
+    r = client.post("/translate", headers={"x-api-token": "secret"},
+                    json={"video": str(video), "provider": "ollama", "rush": True})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["queued"] and body["provider"] == "ollama"
+
+    job = client.get(f"/jobs/{body['job']}", headers={"x-api-token": "secret"}).json()
+    assert job["provider"] == "ollama" and job["priority"] == 1
+
+
+def test_rushing_locally_needs_no_api_key(client, tmp_path):
+    from app.config import settings as s
+    s.anthropic_api_key = ""
+    video = tmp_path / "NoKey.Needed.2024.mkv"
+    video.write_bytes(b"x")
+
+    ok = client.post("/translate", headers={"x-api-token": "secret"},
+                     json={"video": str(video), "provider": "ollama", "rush": True})
+    assert ok.json()["queued"] is True
+
+    # ...whereas Claude still refuses up front rather than failing later
+    denied = client.post("/translate", headers={"x-api-token": "secret"},
+                         json={"video": str(video), "provider": "anthropic", "rush": True})
+    assert denied.status_code == 400
+
+
+def test_the_rush_lane_takes_a_local_job(tmp_path):
+    from app.store import Store
+    store = Store(tmp_path / "lane.db")
+    store.enqueue("/m/backlog.mkv")                       # ordinary queue
+    rush = store.enqueue("/m/now.mkv", provider="ollama", priority=1)
+    assert store.claim_next(priority_only=True)["id"] == rush
+
+
+def test_library_offers_both_rush_buttons(client):
+    page = client.get("/library?token=secret").text
+    assert "local now" in page and "Claude now" in page
+    assert "'ollama'" in page and "'anthropic'" in page
