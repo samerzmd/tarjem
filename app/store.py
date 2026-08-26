@@ -71,11 +71,16 @@ class Store:
             self._db.executescript(SCHEMA)
             self._migrate()
             self._db.executescript(INDEXES)
-            # A restart mid-job would otherwise leave a permanent "running" row.
-            self._db.execute(
-                "UPDATE jobs SET status=?, error=? WHERE status=?",
-                (FAILED, "interrupted by restart", RUNNING),
-            )
+            # A job interrupted by a restart goes back in the queue rather than
+            # being failed. Failing it meant every redeploy permanently threw
+            # away whatever was mid-flight - on a provider where one file takes
+            # over an hour, that is real work lost for no reason.
+            resumed = self._db.execute(
+                "UPDATE jobs SET status=?, progress=0, stage=? WHERE status=?",
+                (QUEUED, "requeued after a restart", RUNNING),
+            ).rowcount
+            if resumed:
+                log.info("requeued %d job(s) interrupted by a restart", resumed)
             self._db.commit()
 
     def _migrate(self) -> None:
@@ -170,13 +175,21 @@ class Store:
             row = self._db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return _row(row) if row else None
 
-    def recent(self, limit: int = 50, status: str | None = None) -> list[dict]:
+    def recent(self, limit: int = 50, status: str | None = None,
+               running_first: bool = False) -> list[dict]:
         query = "SELECT * FROM jobs"
         params: tuple = ()
         if status:
             query += " WHERE status=?"
             params = (status,)
-        query += " ORDER BY id DESC LIMIT ?"
+        if running_first:
+            # Newest-first buries the job actually doing work under every item
+            # the sweeper has queued since - which reads as "nothing is
+            # happening" when one file legitimately takes an hour.
+            query += " ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, id DESC"
+        else:
+            query += " ORDER BY id DESC"
+        query += " LIMIT ?"
         with self._lock:
             rows = self._db.execute(query, (*params, limit)).fetchall()
         return [_row(r) for r in rows]

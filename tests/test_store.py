@@ -80,3 +80,31 @@ def test_requeue_can_switch_provider(tmp_path):
     row = store.get(second)
     assert row["provider"] == "anthropic" and row["priority"] == 1
     assert row["trigger"] == "rush" and row["status"] == QUEUED
+
+
+def test_a_job_interrupted_by_a_restart_is_requeued_not_failed(tmp_path):
+    """A redeploy used to fail whatever was mid-flight. On a provider where one
+    file takes over an hour, that threw away real work every single deploy."""
+    path = tmp_path / "restart.db"
+    store = Store(path)
+    job = store.enqueue("/m/long.mkv")
+    claimed = store.claim_next()
+    assert claimed["id"] == job and claimed["status"] == "running"
+
+    reopened = Store(path)              # simulates the container restarting
+    row = reopened.get(job)
+    assert row["status"] == QUEUED
+    assert "restart" in row["stage"]
+    assert reopened.claim_next()["id"] == job
+
+
+def test_the_running_job_is_listed_first(tmp_path):
+    """Newest-first buried the job doing work under everything queued since."""
+    store = Store(tmp_path / "order.db")
+    running = store.enqueue("/m/a.mkv")
+    store.claim_next()
+    for n in range(5):
+        store.enqueue(f"/m/later{n}.mkv")
+
+    assert store.recent(10)[0]["id"] != running                 # newest-first
+    assert store.recent(10, running_first=True)[0]["id"] == running

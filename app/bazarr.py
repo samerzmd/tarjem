@@ -7,6 +7,7 @@ the folder once a translation lands so the new sidecar shows up in the UI.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -29,6 +30,8 @@ class BazarrClient:
     def __init__(self, cfg: Settings):
         self.cfg = cfg
         self.enabled = bool(cfg.bazarr_url and cfg.bazarr_api_key)
+        self._ping_ok = False
+        self._ping_at = 0.0
         self._client = httpx.Client(
             base_url=f"{cfg.bazarr_url}/api",
             headers={"X-API-KEY": cfg.bazarr_api_key},
@@ -38,13 +41,19 @@ class BazarrClient:
     def close(self) -> None:
         self._client.close()
 
-    def ping(self) -> bool:
+    def ping(self, ttl: float = 30.0) -> bool:
+        """Cached: the dashboard auto-refreshes, and every load asked twice."""
         if not self.enabled:
             return False
+        now = time.monotonic()
+        if self._ping_at and now - self._ping_at < ttl:
+            return self._ping_ok
         try:
-            return self._client.get("/system/status").status_code == 200
+            self._ping_ok = self._client.get("/system/status").status_code == 200
         except httpx.RequestError:
-            return False
+            self._ping_ok = False
+        self._ping_at = now
+        return self._ping_ok
 
     # -- discovery --------------------------------------------------------
 

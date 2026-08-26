@@ -629,7 +629,7 @@ def dashboard(request: Request):
     ) or '<span class="pill">no jobs yet</span>'
 
     rows = []
-    for j in db.recent(40):
+    for j in db.recent(40, running_first=True):
         pct = int((j.get("progress") or 0) * 100)
         stats = j.get("stats") or {}
         if j["status"] == "done" and stats:
