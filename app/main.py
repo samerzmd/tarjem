@@ -738,6 +738,13 @@ def backends_page(request: Request):
 </div>"""
 
     script = ui.JS_BASE + """
+function work(b) {
+  if (!b.done && !b.failed) return "nothing yet";
+  const bits = [b.done + (b.done === 1 ? " job" : " jobs")];
+  if (b.cues) bits.push(b.cues.toLocaleString() + " cues");
+  if (b.failed) bits.push(b.failed + " failed");
+  return bits.join(" · ");
+}
 function render(list) {
   const TOTAL = list.reduce((n, b) => n + (b.cues || 0), 0);
   document.getElementById("rows").innerHTML = list.map(function (b) {
@@ -751,13 +758,14 @@ function render(list) {
       "</span></td>" +
       "<td class='sub mono'>" + esc(b.model || "(default)") + "</td>" +
       "<td>" + state + "</td>" +
+      "<td class='sub'>" + work(b) + "</td>" +
       "<td style='white-space:nowrap'>" +
       "<button onclick=\\"toggle('" + esc(b.name) + "'," + (!b.enabled) + ")\\">" +
         (b.enabled ? "Disable" : "Enable") + "</button>" +
       "<button class='danger' " + (b.busy ? "disabled" : "") +
         " onclick=\\"remove('" + esc(b.name) + "')\\">Remove</button>" +
       "</td></tr>";
-  }).join("") || "<tr><td colspan='4' class='empty'>No backends configured</td></tr>";
+  }).join("") || "<tr><td colspan='5' class='empty'>No backends configured</td></tr>";
 }
 async function load() {
   try { render((await api("GET", "/api/backends")).backends); }
