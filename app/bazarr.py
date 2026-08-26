@@ -32,6 +32,8 @@ class BazarrClient:
         self.enabled = bool(cfg.bazarr_url and cfg.bazarr_api_key)
         self._ping_ok = False
         self._ping_at = 0.0
+        self._index_cache: dict = {"series": {}, "movies": {}}
+        self._index_at = 0.0
         self._client = httpx.Client(
             base_url=f"{cfg.bazarr_url}/api",
             headers={"X-API-KEY": cfg.bazarr_api_key},
@@ -103,6 +105,53 @@ class BazarrClient:
                 item = by_id.get(key)
                 if item and row.get("path"):
                     item.path = self.cfg.to_local(row["path"])
+
+    # -- locating an item by path -----------------------------------------
+
+    def locate(self, video: str, ttl: float = 600.0) -> tuple[str, int, int] | None:
+        """Find the Bazarr item a file belongs to: (kind, series_id, item_id).
+
+        Only jobs that came from Bazarr carry its ids. Anything queued from the
+        library page has none, so the subtitle was written and Bazarr never
+        told - it would not appear until its own next disk scan. Series are
+        matched by folder prefix, films by exact path.
+        """
+        if not (self.enabled and self.cfg.notify_bazarr):
+            return None
+        index = self._index(ttl)
+        video = str(video)
+
+        radarr_id = index["movies"].get(video)
+        if radarr_id:
+            return ("movie", 0, radarr_id)
+
+        # Longest prefix wins: a series inside another series' folder should
+        # match the inner one.
+        best, best_id = "", 0
+        for path, series_id in index["series"].items():
+            if video.startswith(path.rstrip("/") + "/") and len(path) > len(best):
+                best, best_id = path, series_id
+        if best_id:
+            return ("episode", best_id, 0)
+        return None
+
+    def _index(self, ttl: float) -> dict:
+        now = time.monotonic()
+        if self._index_at and now - self._index_at < ttl:
+            return self._index_cache
+
+        series, movies = {}, {}
+        for row in self._get("/series", {"start": 0, "length": -1}).get("data", []):
+            if row.get("path") and row.get("sonarrSeriesId"):
+                series[self.cfg.to_local(row["path"])] = row["sonarrSeriesId"]
+        for row in self._get("/movies", {"start": 0, "length": -1}).get("data", []):
+            if row.get("path") and row.get("radarrId"):
+                movies[self.cfg.to_local(row["path"])] = row["radarrId"]
+
+        self._index_cache = {"series": series, "movies": movies}
+        self._index_at = now
+        log.info("bazarr index: %d series, %d films", len(series), len(movies))
+        return self._index_cache
 
     # -- write-back -------------------------------------------------------
 

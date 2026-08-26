@@ -293,14 +293,23 @@ class Pipeline:
         Without the ids from the webhook or a sweep there is nothing to target,
         and Bazarr will pick the file up on its own next scan instead.
         """
-        kind = job.get("bz_kind") or (
-            "episode" if SEASON_DIR_RE.match(video.parent.name.strip()) else "movie"
-        )
+        kind = job.get("bz_kind") or ""
         series_id = int(job.get("bz_series_id") or 0)
         item_id = int(job.get("bz_item_id") or 0)
+
         if not (series_id or item_id):
-            return
-        self.bazarr.rescan(kind, series_id, item_id)
+            # Queued from the library page rather than by Bazarr, so it has no
+            # ids. Ask Bazarr which item this file belongs to, otherwise the
+            # subtitle sits on disk unnoticed until its next scan.
+            found = self.bazarr.locate(str(video))
+            if not found:
+                log.debug("no bazarr item matches %s - it will be found on the "
+                          "next disk scan", video.name)
+                return
+            kind, series_id, item_id = found
+
+        if self.bazarr.rescan(kind, series_id, item_id):
+            log.info("asked bazarr to rescan %s %s", kind, series_id or item_id)
 
 
 class Worker(threading.Thread):

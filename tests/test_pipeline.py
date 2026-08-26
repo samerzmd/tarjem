@@ -19,12 +19,18 @@ ENGLISH = "\n\n".join(
 
 
 class FakeBazarr:
-    def __init__(self):
+    def __init__(self, knows=None):
         self.rescans = []
+        self.lookups = []
+        self.knows = knows          # what locate() should answer, if anything
 
     def rescan(self, kind, series_id, item_id):
         self.rescans.append((kind, series_id, item_id))
         return True
+
+    def locate(self, video):
+        self.lookups.append(video)
+        return self.knows
 
 
 @pytest.fixture
@@ -99,12 +105,33 @@ def test_asks_bazarr_to_rescan_when_it_has_an_id(rig, tmp_path):
     assert bazarr.rescans == [("episode", 7, 99)]
 
 
-def test_no_rescan_without_an_id(rig, tmp_path):
+def test_a_job_queued_here_is_looked_up_by_path(rig, tmp_path):
+    """Nothing queued from the library page carries Bazarr's ids, so without
+    the lookup the subtitle sat on disk and Bazarr kept showing it missing."""
     cfg, store, bazarr, _provider, pipeline = rig
+    bazarr.knows = ("episode", 7, 0)
+    video = make_media(tmp_path)
+    store.enqueue(str(video), "", "", "manual")
+    pipeline.run(dict(store.claim_next()))
+    assert bazarr.lookups == [str(video)]
+    assert bazarr.rescans == [("episode", 7, 0)]
+
+
+def test_no_rescan_when_bazarr_does_not_know_the_file(rig, tmp_path):
+    cfg, store, bazarr, _provider, pipeline = rig
+    bazarr.knows = None
     video = make_media(tmp_path)
     store.enqueue(str(video), "", "", "manual")
     pipeline.run(dict(store.claim_next()))
     assert bazarr.rescans == []
+
+
+def test_a_job_with_ids_does_not_need_the_lookup(rig, tmp_path):
+    cfg, store, bazarr, _provider, pipeline = rig
+    video = make_media(tmp_path)
+    store.enqueue(str(video), "", "", "bazarr", "episode", 7, 99)
+    pipeline.run(dict(store.claim_next()))
+    assert bazarr.lookups == []
 
 
 def test_skips_when_arabic_already_exists(rig, tmp_path):
