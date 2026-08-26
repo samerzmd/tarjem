@@ -147,7 +147,7 @@ class OpenAIProvider(Provider):
             raise ProviderError("empty response", retryable=True)
 
         try:
-            return schema_model.model_validate(_coerce(json.loads(text)))
+            return schema_model.model_validate(_coerce(_loads(text)))
         except (json.JSONDecodeError, ValueError) as exc:
             raise ProviderError(
                 f"unparseable structured output: {exc} | {text[:200]}", retryable=True
@@ -158,6 +158,20 @@ class OpenAIProvider(Provider):
 
 
 ALIASES = ("ar", "arabic", "translation", "translated", "text", "value")
+
+
+def _loads(text: str):
+    """Parse the first JSON value and ignore whatever follows it.
+
+    An unconstrained model often adds a closing remark, or a second copy of the
+    answer, after the JSON. json.loads rejects the lot with "Extra data"; the
+    translation sitting in front of it is perfectly good.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        value, _ = json.JSONDecoder().raw_decode(text)
+        return value
 
 
 def _coerce(data):

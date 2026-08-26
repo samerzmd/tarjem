@@ -208,3 +208,22 @@ def test_json_schema_falls_back_on_a_400_whatever_the_wording():
 
     assert len(call(provider(handler)).cues) == 2
     assert modes[0] == "json_schema" and modes[1] == "json_object"
+
+
+def test_trailing_content_after_the_json_is_ignored():
+    """Unconstrained, a model often adds a closing remark after the answer.
+    json.loads rejects the lot with 'Extra data'; the translation is fine."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=reply(
+            json.dumps(CUES) + "\n\nI hope this helps with your subtitles!"))
+
+    assert len(call(provider(handler)).cues) == 2
+
+
+def test_a_bare_array_with_trailing_content_also_parses():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=reply(
+            json.dumps([{"id": 0, "text": "مرحبا"}]) + "\n[duplicate copy]"))
+
+    out = call(provider(handler))
+    assert len(out.cues) == 1 and out.cues[0].ar == "مرحبا"
