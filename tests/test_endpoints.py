@@ -119,3 +119,50 @@ def test_status_reports_what_each_backend_is_doing():
     busy = [r for r in rows if r["busy"]]
     assert len(busy) == 1 and busy[0]["name"] == leased.name
     assert all(r["healthy"] for r in rows)
+
+
+# -- a named provider still spreads across machines ------------------------
+# The rush button always names a provider, and naming one used to bypass the
+# pool entirely - so "local now" always ran on whichever box OLLAMA_URL points
+# at, and a second ollama machine never got a look in.
+
+THREE = ("ollama@http://a:11434#m,ollama@http://b:11434#m,"
+         "anthropic@https://api.anthropic.com#claude-sonnet-5")
+
+
+def test_asking_for_ollama_spreads_over_every_ollama_machine():
+    pool = Pool(parse(THREE))
+    first, second = pool.acquire("ollama"), pool.acquire("ollama")
+    assert first is not None and second is not None and first is not second
+    assert {first.name, second.name} == {"ollama@a:11434", "ollama@b:11434"}
+    assert pool.acquire("ollama") is None      # both ollama boxes now busy
+
+
+def test_local_is_the_same_thing_as_ollama():
+    pool = Pool(parse(THREE))
+    assert pool.has_kind("local") and pool.has_kind("ollama")
+    assert pool.acquire("local").kind == "ollama"
+
+
+def test_a_kind_never_leases_a_machine_of_another_kind():
+    pool = Pool(parse(THREE))
+    for _ in range(2):
+        pool.acquire("ollama")
+    # every ollama box is busy, but the anthropic one must not be handed out
+    assert pool.acquire("ollama") is None
+    assert pool.acquire("anthropic").kind == "anthropic"
+
+
+def test_has_kind_says_when_the_pool_cannot_serve_a_provider():
+    local_only = Pool(parse("ollama@http://a:11434#m"))
+    assert local_only.has_kind("ollama")
+    assert not local_only.has_kind("anthropic")   # so that job bypasses the pool
+
+
+def test_available_respects_the_requested_kind():
+    pool = Pool(parse(THREE))
+    for _ in range(2):
+        pool.acquire("ollama")
+    assert not pool.available("ollama")
+    assert pool.available("anthropic")
+    assert pool.available()                      # something is still free

@@ -112,19 +112,23 @@ class Pipeline:
             log.info("job %s: overriding provider to %s (%s)",
                      job_id, cfg.provider, cfg.active_model)
 
-        # With a pool configured, take a backend of our own so two workers do
-        # not both drive the same GPU while another sits idle. A job that names
-        # its own provider (a rush on Claude) bypasses the pool entirely.
+        # Take a backend of our own so two workers do not both drive the same
+        # GPU while another sits idle. Naming a provider narrows which machines
+        # qualify - it does not mean "skip the pool": a local rush should still
+        # be spread across every ollama box, not pinned to the default URL.
         endpoint: Endpoint | None = None
-        if self.pool and not job.get("provider"):
-            endpoint = self.pool.acquire()
+        wanted = job.get("provider") or ""
+        if self.pool and (not wanted or self.pool.has_kind(wanted)):
+            endpoint = self.pool.acquire(wanted)
             if endpoint is None:
-                self.store.update(job_id, status="queued", stage="waiting for a free backend")
+                self.store.update(job_id, status="queued",
+                                  stage="waiting for a free backend")
                 return
             self.store.update(job_id, stage=f"on {endpoint.name}",
                               backend=endpoint.name)
         elif not job.get("backend"):
-            # No pool: record the provider so the column is never blank.
+            # Nothing in the pool serves this provider - Claude, usually, with
+            # only local machines configured. Record it so the column is filled.
             self.store.update(job_id, backend=cfg.provider)
 
         try:
@@ -281,8 +285,11 @@ class Worker(threading.Thread):
             # immediately put it back - and with every backend disabled that
             # becomes a hot loop.
             if self.pipeline.pool and not self.pipeline.pool.available():
-                self._stop.wait(5)
-                continue
+                # The rush lane must not stall on a full pool: its jobs may name
+                # a provider no backend serves, and those need no lease.
+                if not self.priority_only:
+                    self._stop.wait(5)
+                    continue
             job = self.store.claim_next(priority_only=self.priority_only)
             if not job:
                 self._stop.wait(3)

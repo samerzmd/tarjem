@@ -26,6 +26,18 @@ log = logging.getLogger(__name__)
 
 DOWN_SECONDS = 180.0
 
+# A job names a provider; a backend declares a kind. They are the same idea
+# under two spellings, so asking for "ollama" has to match a "local" backend.
+KINDS = {
+    "ollama": "ollama", "local": "ollama",
+    "openai": "openai", "openai-compatible": "openai", "lmstudio": "openai",
+    "anthropic": "anthropic",
+}
+
+
+def normalise(kind: str) -> str:
+    return KINDS.get((kind or "").strip().lower(), (kind or "").strip().lower())
+
 
 @dataclass
 class Endpoint:
@@ -91,16 +103,30 @@ class Pool:
     def __bool__(self) -> bool:
         return bool(self.endpoints)
 
-    def available(self) -> bool:
+    def has_kind(self, kind: str) -> bool:
+        want = normalise(kind)
+        return any(normalise(e.kind) == want for e in self.endpoints)
+
+    def available(self, kind: str = "") -> bool:
         """Is any backend usable and idle? Checked before claiming a job, so a
         worker does not claim work it would only have to put back."""
+        want = normalise(kind) if kind else ""
         with self._lock:
-            return any(e.usable() and not e.lock.locked() for e in self.endpoints)
+            return any(e.usable() and not e.lock.locked()
+                       and (not want or normalise(e.kind) == want)
+                       for e in self.endpoints)
 
-    def acquire(self) -> Endpoint | None:
-        """Take an idle, usable backend. None if every one is busy or off."""
+    def acquire(self, kind: str = "") -> Endpoint | None:
+        """Take an idle, usable backend, optionally of one kind.
+
+        A job that asks for "ollama" should still be spread across every ollama
+        machine - naming a provider is about which software answers, not which
+        box does the work.
+        """
+        want = normalise(kind) if kind else ""
         with self._lock:
-            usable = [e for e in self.endpoints if e.usable()]
+            usable = [e for e in self.endpoints
+                      if e.usable() and (not want or normalise(e.kind) == want)]
             if not usable:
                 return None
             for endpoint in usable:
