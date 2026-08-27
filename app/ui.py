@@ -122,8 +122,50 @@ input::placeholder{color:#6b6b6b}
 .toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:16px}
 @media(max-width:760px){
   :root{--rail:0px}
-  .rail{display:none}
+  /* The rail turns into a strip across the top. It used to be display:none,
+     which left a phone with no navigation at all - you landed on Activity and
+     could not reach the library or the backends from there. */
+  .rail{position:static;width:auto;height:auto;overflow:visible;
+        border-right:0;border-bottom:1px solid var(--border)}
+  .brand{height:50px;font-size:16px}
+  .nav{display:flex;padding:0}
+  .nav a{flex:1;justify-content:center;gap:7px;padding:11px 4px;font-size:13px;
+         border-left:0;border-bottom:3px solid transparent}
+  .nav a.on{border-left-color:transparent;border-bottom-color:var(--accent)}
+  .railfoot{display:none}
+  .top{display:none}          /* the active tab already says which page this is */
+  .wrap{margin-left:0}
+  .content{padding:13px}
   thead th{top:0}
+
+  /* A panel scrolls on its own rather than dragging the whole page sideways.
+     Half of every table used to sit off the right edge, unreachable. */
+  .panel{overflow-x:auto}
+  td,.mono{overflow-wrap:anywhere}
+  .panel h2{flex-wrap:wrap}   /* a series title and its button stack instead */
+
+  /* Thumb-sized controls. */
+  button{padding:8px 13px}
+  input,select{padding:8px 10px}
+  .toolbar{gap:5px}
+  /* Beats the inline widths these fields carry for the desktop layout. */
+  #path,#q,#url,#model{width:100% !important;margin-right:0}
+
+  /* Columns that cannot earn their width on a phone. What each job is and how
+     far along it is survive; the id, the machine and the result do not. */
+  .page-jobs th:nth-child(1),.page-jobs td:nth-child(1),
+  .page-jobs th:nth-child(5),.page-jobs td:nth-child(5),
+  .page-jobs th:nth-child(6),.page-jobs td:nth-child(6){display:none}
+  .page-backends th:nth-child(2),.page-backends td:nth-child(2),
+  .page-backends th:nth-child(4),.page-backends td:nth-child(4){display:none}
+  .page-library td:nth-child(3){display:none}   /* the release filename */
+
+  /* Picking episodes means scrolling, so keep the actions under the thumb. */
+  .page-library{padding-bottom:104px}
+  #selbar{position:fixed;left:0;right:0;bottom:0;z-index:20;margin:0;
+          border:0;border-top:1px solid var(--border);border-radius:0}
+  #selbar .inner{padding:10px 12px}
+  #selbar button{margin-bottom:0}
 }
 """
 
@@ -164,7 +206,7 @@ def shell(*, title: str, active: str, heading: str, body: str,
         "</div>"
         "<div class='wrap'>"
         f"<div class='top'><h1>{heading}</h1><div class='spacer'></div></div>"
-        f"<div class='content'>{body}</div>"
+        f"<div class='content page-{active}'>{body}</div>"
         "</div>"
         f"<script>{script}</script></body></html>"
     )
