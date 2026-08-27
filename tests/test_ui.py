@@ -42,9 +42,11 @@ def test_the_body_is_tagged_with_its_page():
         assert f"content page-{active}" in page(active)
 
 
-def test_panels_scroll_rather_than_the_page():
-    mobile = ui.CSS.split("@media(max-width:760px)")[1]
-    assert re.search(r"\.panel\{[^}]*overflow-x:auto", mobile)
+def test_panels_scroll_rather_than_the_page_at_every_width():
+    """Not just on a phone: a tablet at 768px sits above the breakpoint, and
+    the activity table pushed the document 300px past its right edge."""
+    base = ui.CSS.split("@media")[0]
+    assert re.search(r"\.panel\{[^}]*overflow-x:auto", base)
 
 
 def test_the_selection_bar_stays_in_reach():

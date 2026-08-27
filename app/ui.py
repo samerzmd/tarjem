@@ -73,6 +73,10 @@ a.pill:hover{background:#3f3f3f;text-decoration:none}
 .panel{
   background:var(--panel); border:1px solid var(--border); border-radius:4px;
   margin-bottom:18px;
+  /* A table wider than the panel scrolls inside it. Without this the document
+     itself scrolled sideways on anything narrower than a laptop - a tablet at
+     768px pushed the activity table 300px past the right edge. */
+  overflow-x:auto;
 }
 .panel h2{
   font-size:13px; font-weight:500; text-transform:uppercase; letter-spacing:.6px;
@@ -139,9 +143,6 @@ input::placeholder{color:#6b6b6b}
   .content{padding:13px}
   thead th{top:0}
 
-  /* A panel scrolls on its own rather than dragging the whole page sideways.
-     Half of every table used to sit off the right edge, unreachable. */
-  .panel{overflow-x:auto}
   td,.mono{overflow-wrap:anywhere}
   .panel h2{flex-wrap:wrap}   /* a series title and its button stack instead */
 
