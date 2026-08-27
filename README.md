@@ -44,6 +44,12 @@ first.
 
 ![The backends page](docs/screenshots/backends.png)
 
+**On a phone** — the rail lies flat as tabs, table rows stack into cards rather
+than being squeezed, and the selection bar sticks to the bottom of the screen so
+the buttons stay under your thumb while you scroll a season.
+
+<img src="docs/screenshots/mobile.png" width="420" alt="The library on a narrow screen">
+
 ---
 
 ## How it plugs into your stack
