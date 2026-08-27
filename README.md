@@ -64,6 +64,13 @@ Sonarr/Radarr ──> Bazarr ──(finds English, fires post-processing)──>
                                                  Jellyfin
 ```
 
+The stack this was built against — Sonarr, Radarr, Prowlarr, Bazarr, Jellyfin
+and the rest as a single compose file — is
+[samerzmd/media-server](https://github.com/samerzmd/media-server), which already
+carries a tarjem service block wired up to Bazarr. Nothing here depends on that
+particular repo, though: any *arr setup works, as long as Bazarr and tarjem
+mount the media at the same paths.
+
 Two triggers, and you want both:
 
 | Trigger | Fires when | Covers |
@@ -99,9 +106,11 @@ translation:
 docker compose up -d --build
 ```
 
-Or paste the service block into `media-server/docker-compose.yml` and bring the
-whole stack up together — see [`docker-compose.yml`](docker-compose.yml) for the
-block. Either way, `user: "1000:1000"` must match the `PUID`/`PGID` the rest of
+Or paste the service block into your stack's own compose file and bring
+everything up together — see [`docker-compose.yml`](docker-compose.yml) for the
+block, or
+[media-server](https://github.com/samerzmd/media-server) for it already in
+place, alongside the rest of the stack. Either way, `user: "1000:1000"` must match the `PUID`/`PGID` the rest of
 your stack runs as, or the sidecars land with the wrong owner.
 
 Check it came up: `http://YOUR-SERVER:8081/` shows a live job list.
