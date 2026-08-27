@@ -414,4 +414,22 @@ webhook shapes Bazarr actually sends.
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE) — tarjem's own code, and that is all it covers. What you point
+it at comes with its own terms, and the default local model has real strings
+attached:
+
+| | Licence |
+|---|---|
+| **tarjem** | MIT |
+| **`command-r7b-arabic`** — the default local model | [CC-BY-NC 4.0](https://huggingface.co/CohereLabs/c4ai-command-r7b-arabic-02-2025) plus Cohere Labs' Acceptable Use Policy — **non-commercial** |
+| **Claude** | Anthropic's commercial API terms, billed per token |
+| **Ollama, Bazarr, the *arrs** | Separate projects, each under its own licence |
+
+The non-commercial one is the one to notice: Cohere Labs release Command R7B
+Arabic for research and personal use, not for running a business on. Nothing in
+tarjem depends on that particular model — point `OLLAMA_MODEL` at a
+permissively licensed one if it matters to you.
+
+A translation is also a derivative of the subtitle it came from. Whatever you
+were entitled to do with the English track, you are entitled to do with the
+Arabic one — and no more.
