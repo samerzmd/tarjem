@@ -129,8 +129,9 @@ input::placeholder{color:#6b6b6b}
         border-right:0;border-bottom:1px solid var(--border)}
   .brand{height:50px;font-size:16px}
   .nav{display:flex;padding:0}
-  .nav a{flex:1;justify-content:center;gap:7px;padding:11px 4px;font-size:13px;
-         border-left:0;border-bottom:3px solid transparent}
+  .nav a{flex:1;min-width:0;justify-content:center;gap:6px;padding:11px 2px;
+         font-size:12.5px;border-left:0;border-bottom:3px solid transparent}
+  .nav svg{width:15px;height:15px}
   .nav a.on{border-left-color:transparent;border-bottom-color:var(--accent)}
   .railfoot{display:none}
   .top{display:none}          /* the active tab already says which page this is */
@@ -151,14 +152,21 @@ input::placeholder{color:#6b6b6b}
   /* Beats the inline widths these fields carry for the desktop layout. */
   #path,#q,#url,#model{width:100% !important;margin-right:0}
 
-  /* Columns that cannot earn their width on a phone. What each job is and how
-     far along it is survive; the id, the machine and the result do not. */
-  .page-jobs th:nth-child(1),.page-jobs td:nth-child(1),
-  .page-jobs th:nth-child(5),.page-jobs td:nth-child(5),
-  .page-jobs th:nth-child(6),.page-jobs td:nth-child(6){display:none}
-  .page-backends th:nth-child(2),.page-backends td:nth-child(2),
-  .page-backends th:nth-child(4),.page-backends td:nth-child(4){display:none}
-  .page-library td:nth-child(3){display:none}   /* the release filename */
+  /* A row of a data table cannot be made to fit 390px - squeezed, the title
+     column breaks mid-word and the rest still runs off the edge. So a row
+     becomes a stacked card instead, and nothing is dropped to achieve it. */
+  .page-jobs thead,.page-backends thead{display:none}
+  .page-jobs table,.page-jobs tbody,.page-jobs tr,.page-jobs td,
+  .page-backends table,.page-backends tbody,.page-backends tr,
+  .page-backends td{display:block;width:auto}
+  .page-jobs tr,.page-backends tr{padding:11px 14px;border-bottom:1px solid #333}
+  .page-jobs td,.page-backends td{padding:3px 0;border:0}
+  .page-jobs tr:hover,.page-backends tr:hover{background:none}
+
+  /* The library keeps its rows: an episode is a checkbox, a number and a
+     state, which does fit. The filename does not, and the per-row buttons are
+     redundant on a phone - the selection bar at the foot does the same job. */
+  .page-library td:nth-child(3),.page-library td:nth-child(5){display:none}
 
   /* Picking episodes means scrolling, so keep the actions under the thumb. */
   .page-library{padding-bottom:104px}
